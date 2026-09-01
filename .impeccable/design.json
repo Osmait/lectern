@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedAt": "2026-09-01T18:20:00.000Z",
-  "title": "Design System: Book Read",
+  "title": "Design System: Lectern",
   "extensions": {
     "colorMeta": {
       "linen-shell": {
@@ -171,7 +171,7 @@
   ],
   "narrative": {
     "northStar": "The Scholar's Margin",
-    "overview": "Book Read is a calm native reading desk. The PDF stays dominant while a contextual paper margin carries the tools needed to write, erase, undo, and confirm local persistence. The visual world combines a linen-dark application shell with warm uncoated paper, graphite rules, and precise editorial color. The interface is restrained rather than sparse. Controls remain directly labeled where meaning matters, selected states move decisively forward, and destructive actions are unmistakable without becoming loud.",
+    "overview": "Lectern is a calm native reading desk. The PDF stays dominant while a contextual paper margin carries the tools needed to write, erase, undo, and confirm local persistence. The visual world combines a linen-dark application shell with warm uncoated paper, graphite rules, and precise editorial color. The interface is restrained rather than sparse. Controls remain directly labeled where meaning matters, selected states move decisively forward, and destructive actions are unmistakable without becoming loud.",
     "keyCharacteristics": [
       "Document-first composition with a fold-out annotation margin.",
       "Flat paper surfaces separated by value and one-pixel graphite rules.",

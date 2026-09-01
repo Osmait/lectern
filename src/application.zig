@@ -12,11 +12,11 @@
 //! the storage, and the render queue releases them after `deinit`.
 
 const std = @import("std");
-const book_read = @import("book_read");
-const annotations = book_read.annotations;
-const progress = book_read.progress;
-const Reader = book_read.Reader;
-const Preferences = book_read.Preferences;
+const lectern = @import("lectern");
+const annotations = lectern.annotations;
+const progress = lectern.progress;
+const Reader = lectern.Reader;
+const Preferences = lectern.Preferences;
 const ui = @import("ui.zig");
 const commands = @import("commands.zig");
 const storage_module = @import("storage.zig");
@@ -1173,16 +1173,16 @@ pub fn ApplicationType(comptime backend: type) type {
 
         fn documentTitle(self: *Self) []const u8 {
             const document = self.document orelse return "Open PDF";
-            return book_read.baseName(document.path());
+            return lectern.baseName(document.path());
         }
 
         fn updateTitle(self: *Self) void {
             var title_buffer: [512]u8 = undefined;
             const title = std.fmt.bufPrintZ(
                 &title_buffer,
-                "Book Read - {s} - page {d}/{d}",
+                "Lectern - {s} - page {d}/{d}",
                 .{ self.documentTitle(), self.reader.page_index + 1, self.reader.pageCount() },
-            ) catch "Book Read";
+            ) catch "Lectern";
             self.context.setTitle(title);
         }
 
@@ -1292,7 +1292,7 @@ test "application opens a document and restores all persisted state" {
     try std.testing.expectEqual(@as(usize, 1), application.page.page_index);
     try std.testing.expect(application.page.texture != null);
     try std.testing.expect(!state.last_render_dark_mode);
-    try std.testing.expectEqualStrings("Book Read - book.pdf - page 2/3", state.titleText());
+    try std.testing.expectEqualStrings("Lectern - book.pdf - page 2/3", state.titleText());
     try std.testing.expectEqual(@as(?u64, null), application.render_timer);
     // The first page renders before the open commits; both neighbors follow.
     try std.testing.expectEqual(@as(usize, 3), state.render_count);

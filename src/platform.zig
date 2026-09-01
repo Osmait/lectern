@@ -9,8 +9,8 @@
 //! a render in progress.
 
 const std = @import("std");
-const book_read = @import("book_read");
-const annotations = book_read.annotations;
+const lectern = @import("lectern");
+const annotations = lectern.annotations;
 const ui = @import("ui.zig");
 const rendering = @import("rendering.zig");
 const layout = ui.layout;
@@ -23,14 +23,14 @@ const c = @cImport({
 });
 
 pub const Texture = struct {
-    handle: *c.BR_Texture,
+    handle: *c.LECTERN_Texture,
     width: u32,
     height: u32,
 
-    fn fromHandle(handle: *c.BR_Texture) Texture {
+    fn fromHandle(handle: *c.LECTERN_Texture) Texture {
         var width: c_int = 0;
         var height: c_int = 0;
-        c.br_texture_size(handle, &width, &height);
+        c.lectern_texture_size(handle, &width, &height);
         return .{
             .handle = handle,
             .width = @intCast(@max(width, 0)),
@@ -39,7 +39,7 @@ pub const Texture = struct {
     }
 
     pub fn deinit(self: *Texture) void {
-        c.br_texture_destroy(self.handle);
+        c.lectern_texture_destroy(self.handle);
         self.* = undefined;
     }
 };
@@ -51,12 +51,12 @@ pub const TextImage = struct {
 };
 
 pub const Context = struct {
-    handle: *c.BR_Context,
+    handle: *c.LECTERN_Context,
 
     pub fn init() error{WindowInitializationFailed}!Context {
         var error_message: [*c]u8 = null;
-        const handle = c.br_init(&error_message) orelse {
-            defer if (error_message != null) c.br_free(error_message);
+        const handle = c.lectern_init(&error_message) orelse {
+            defer if (error_message != null) c.lectern_free(error_message);
             if (error_message != null) {
                 std.log.err("window initialization failed: {s}", .{std.mem.span(error_message)});
             } else {
@@ -68,19 +68,19 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
-        c.br_shutdown(self.handle);
+        c.lectern_shutdown(self.handle);
         self.* = undefined;
     }
 
     /// Message for the most recent native failure. Valid until the next call
     /// into the bridge.
     pub fn lastError(self: Context) [:0]const u8 {
-        return std.mem.span(c.br_last_error(self.handle));
+        return std.mem.span(c.lectern_last_error(self.handle));
     }
 
     pub fn pollInput(self: Context, allocator: std.mem.Allocator) ?input.RawInput {
-        var native: c.BR_Input = undefined;
-        if (c.br_poll_input(self.handle, &native) == 0) return null;
+        var native: c.LECTERN_Input = undefined;
+        if (c.lectern_poll_input(self.handle, &native) == 0) return null;
         return convertInput(allocator, native);
     }
 
@@ -91,82 +91,82 @@ pub const Context = struct {
         allocator: std.mem.Allocator,
         timeout_ms: ?u32,
     ) ?input.RawInput {
-        var native: c.BR_Input = undefined;
+        var native: c.LECTERN_Input = undefined;
         const timeout: c_int = if (timeout_ms) |milliseconds|
             @intCast(@min(milliseconds, std.math.maxInt(c_int)))
         else
             -1;
-        if (c.br_wait_input(self.handle, timeout, &native) == 0) return null;
+        if (c.lectern_wait_input(self.handle, timeout, &native) == 0) return null;
         return convertInput(allocator, native);
     }
 
     pub fn ticksMs(self: Context) u64 {
         _ = self;
-        return c.br_ticks_ms();
+        return c.lectern_ticks_ms();
     }
 
     pub fn windowSize(self: Context) layout.Size {
         var width: f32 = 0;
         var height: f32 = 0;
-        c.br_window_size(self.handle, &width, &height);
+        c.lectern_window_size(self.handle, &width, &height);
         return .{ .width = width, .height = height };
     }
 
     /// Identifies the window in synthetic native events; used by tests.
     pub fn windowId(self: Context) u32 {
-        return c.br_window_id(self.handle);
+        return c.lectern_window_id(self.handle);
     }
 
     pub fn pixelDensity(self: Context) f32 {
-        return c.br_pixel_density(self.handle);
+        return c.lectern_pixel_density(self.handle);
     }
 
     pub fn setWindowSize(self: Context, width: u32, height: u32) bool {
-        return c.br_set_window_size(self.handle, @intCast(width), @intCast(height)) != 0;
+        return c.lectern_set_window_size(self.handle, @intCast(width), @intCast(height)) != 0;
     }
 
     pub fn setTitle(self: Context, title: [:0]const u8) void {
-        c.br_set_title(self.handle, title.ptr);
+        c.lectern_set_title(self.handle, title.ptr);
     }
 
     pub fn showError(self: Context, message: [:0]const u8) void {
-        c.br_show_error(self.handle, message.ptr);
+        c.lectern_show_error(self.handle, message.ptr);
     }
 
     pub fn openDialog(self: Context) void {
-        c.br_open_dialog(self.handle);
+        c.lectern_open_dialog(self.handle);
     }
 
     pub fn saveScreenshot(self: Context, path: [:0]const u8) bool {
-        return c.br_save_screenshot(self.handle, path.ptr) != 0;
+        return c.lectern_save_screenshot(self.handle, path.ptr) != 0;
     }
 
     pub fn beginFrame(self: Context, clear_color: theme.Rgba) frame.FrameInfo {
         var width: f32 = 0;
         var height: f32 = 0;
         var density: f32 = 1;
-        c.br_frame_begin(self.handle, toColor(clear_color), &width, &height, &density);
+        c.lectern_frame_begin(self.handle, toColor(clear_color), &width, &height, &density);
         return .{ .size = .{ .width = width, .height = height }, .density = density };
     }
 
     pub fn endFrame(self: Context) void {
-        c.br_frame_end(self.handle);
+        c.lectern_frame_end(self.handle);
     }
 
     pub fn fillRect(self: Context, rect: layout.Rect, color: theme.Rgba) void {
-        c.br_fill_rect(self.handle, toRect(rect), toColor(color));
+        c.lectern_fill_rect(self.handle, toRect(rect), toColor(color));
     }
 
     pub fn strokeRect(self: Context, rect: layout.Rect, color: theme.Rgba) void {
-        c.br_stroke_rect(self.handle, toRect(rect), toColor(color));
+        c.lectern_stroke_rect(self.handle, toRect(rect), toColor(color));
     }
 
     pub fn setClip(self: Context, rect: ?layout.Rect) void {
         if (rect) |clip| {
             const native = toRect(clip);
-            c.br_set_clip(self.handle, &native);
+            c.lectern_set_clip(self.handle, &native);
         } else {
-            c.br_set_clip(self.handle, null);
+            c.lectern_set_clip(self.handle, null);
         }
     }
 
@@ -176,7 +176,7 @@ pub const Context = struct {
         destination: layout.Rect,
         tint: theme.Rgba,
     ) void {
-        c.br_draw_texture(self.handle, texture.handle, toRect(destination), toColor(tint));
+        c.lectern_draw_texture(self.handle, texture.handle, toRect(destination), toColor(tint));
     }
 
     /// Draws colored triangles. Points, colors, and indices share the
@@ -189,7 +189,7 @@ pub const Context = struct {
     ) void {
         std.debug.assert(vertices.len == colors.len);
         if (vertices.len == 0 or indices.len == 0) return;
-        c.br_draw_triangles(
+        c.lectern_draw_triangles(
             self.handle,
             @ptrCast(vertices.ptr),
             @ptrCast(colors.ptr),
@@ -202,7 +202,7 @@ pub const Context = struct {
     pub fn createText(self: Context, text: [:0]const u8, size: u8, strong: bool) ?TextImage {
         var width: f32 = 0;
         var height: f32 = 0;
-        const handle = c.br_create_text(
+        const handle = c.lectern_create_text(
             self.handle,
             text.ptr,
             size,
@@ -214,25 +214,27 @@ pub const Context = struct {
     }
 
     pub fn measureText(self: Context, text: [:0]const u8, size: u8, strong: bool) f32 {
-        return c.br_measure_text(self.handle, text.ptr, size, @intFromBool(strong));
+        return c.lectern_measure_text(self.handle, text.ptr, size, @intFromBool(strong));
     }
 
     pub fn createIcon(self: Context, icon: theme.Icon, color: theme.Rgba) ?Texture {
-        const handle = c.br_create_icon(self.handle, @intFromEnum(icon), toColor(color)) orelse {
-            return null;
-        };
+        const handle = c.lectern_create_icon(
+            self.handle,
+            @intFromEnum(icon),
+            toColor(color),
+        ) orelse return null;
         return Texture.fromHandle(handle);
     }
 
     /// Uploads a page image rendered by the worker. Main thread only.
-    fn textureFromImage(self: Context, image: *c.BR_Image) ?Texture {
-        const handle = c.br_texture_from_image(self.handle, image) orelse return null;
+    fn textureFromImage(self: Context, image: *c.LECTERN_Image) ?Texture {
+        const handle = c.lectern_texture_from_image(self.handle, image) orelse return null;
         return Texture.fromHandle(handle);
     }
 };
 
 pub const Document = struct {
-    handle: *c.BR_Document,
+    handle: *c.LECTERN_Document,
     allocator: std.mem.Allocator,
     /// Read once at open time; null for pages Poppler could not measure.
     page_sizes: []?layout.Size,
@@ -244,22 +246,24 @@ pub const Document = struct {
     ) error{ InvalidPdf, OutOfMemory }!Document {
         const path_z = try allocator.dupeZ(u8, raw_path);
         defer allocator.free(path_z);
-        const handle = c.br_pdf_open(context.handle, path_z.ptr) orelse return error.InvalidPdf;
-        errdefer c.br_pdf_close(handle);
+        const handle = c.lectern_pdf_open(context.handle, path_z.ptr) orelse {
+            return error.InvalidPdf;
+        };
+        errdefer c.lectern_pdf_close(handle);
 
-        const page_count = c.br_pdf_page_count(handle);
+        const page_count = c.lectern_pdf_page_count(handle);
         const page_sizes = try allocator.alloc(?layout.Size, @intCast(@max(page_count, 0)));
         for (page_sizes, 0..) |*size, index| {
             var width: f32 = 0;
             var height: f32 = 0;
-            const found = c.br_pdf_page_size(handle, @intCast(index), &width, &height);
+            const found = c.lectern_pdf_page_size(handle, @intCast(index), &width, &height);
             size.* = if (found != 0) .{ .width = width, .height = height } else null;
         }
         return .{ .handle = handle, .allocator = allocator, .page_sizes = page_sizes };
     }
 
     pub fn deinit(self: *Document) void {
-        c.br_pdf_close(self.handle);
+        c.lectern_pdf_close(self.handle);
         self.allocator.free(self.page_sizes);
         self.* = undefined;
     }
@@ -269,7 +273,7 @@ pub const Document = struct {
     }
 
     pub fn path(self: Document) []const u8 {
-        return std.mem.span(c.br_pdf_path(self.handle));
+        return std.mem.span(c.lectern_pdf_path(self.handle));
     }
 
     pub fn pageSize(self: Document, page_index: usize) ?layout.Size {
@@ -280,7 +284,7 @@ pub const Document = struct {
     /// Distinguishes document instances for caches; reopening a file yields
     /// a new identity so stale thumbnails are never shown.
     pub fn identity(self: Document) u64 {
-        return c.br_pdf_identity(self.handle);
+        return c.lectern_pdf_identity(self.handle);
     }
 
     /// Rasterizes and uploads on the calling thread. Used when opening a
@@ -293,7 +297,7 @@ pub const Document = struct {
         dark_mode: bool,
     ) error{PageRenderFailed}!Texture {
         if (page_index > std.math.maxInt(c_int)) return error.PageRenderFailed;
-        const handle = c.br_pdf_render(
+        const handle = c.lectern_pdf_render(
             context.handle,
             self.handle,
             @intCast(page_index),
@@ -304,9 +308,14 @@ pub const Document = struct {
     }
 
     /// Rasterizes without touching the window; safe on the worker thread.
-    fn renderImage(self: Document, page_index: usize, scale: f32, dark_mode: bool) ?*c.BR_Image {
+    fn renderImage(
+        self: Document,
+        page_index: usize,
+        scale: f32,
+        dark_mode: bool,
+    ) ?*c.LECTERN_Image {
         if (page_index > std.math.maxInt(c_int)) return null;
-        return c.br_pdf_render_image(
+        return c.lectern_pdf_render_image(
             self.handle,
             @intCast(page_index),
             scale,
@@ -325,7 +334,7 @@ pub const RenderQueue = struct {
 
     const Completed = struct {
         job: Job,
-        image: ?*c.BR_Image,
+        image: ?*c.LECTERN_Image,
     };
 
     allocator: std.mem.Allocator,
@@ -352,7 +361,7 @@ pub const RenderQueue = struct {
         self.condition.broadcast(self.io);
         self.mutex.unlock(self.io);
         if (self.thread) |thread| thread.join();
-        for (self.completed.items) |done| c.br_image_destroy(done.image);
+        for (self.completed.items) |done| c.lectern_image_destroy(done.image);
         self.completed.deinit(self.allocator);
         self.pending.deinit(self.allocator);
         self.* = undefined;
@@ -373,7 +382,7 @@ pub const RenderQueue = struct {
                 owned.scale,
                 owned.dark_mode,
             );
-            errdefer c.br_image_destroy(image);
+            errdefer c.lectern_image_destroy(image);
             try self.completed.append(self.allocator, .{ .job = owned, .image = image });
             return owned.id;
         }
@@ -444,11 +453,11 @@ pub const RenderQueue = struct {
             self.mutex.unlock(self.io);
 
             if (done.job.generation != generation) {
-                c.br_image_destroy(done.image);
+                c.lectern_image_destroy(done.image);
                 continue;
             }
             const image = done.image orelse return .{ .job = done.job, .texture = null };
-            defer c.br_image_destroy(image);
+            defer c.lectern_image_destroy(image);
             return .{ .job = done.job, .texture = context.textureFromImage(image) };
         }
     }
@@ -459,7 +468,7 @@ pub const RenderQueue = struct {
             return;
         };
         // The name only helps profilers and debuggers tell threads apart.
-        thread.setName(self.io, "br-render") catch {};
+        thread.setName(self.io, "lectern-render") catch {};
         self.thread = thread;
     }
 
@@ -481,18 +490,18 @@ pub const RenderQueue = struct {
             self.mutex.lockUncancelable(self.io);
             self.running = null;
             self.completed.append(self.allocator, .{ .job = job, .image = image }) catch {
-                c.br_image_destroy(image);
+                c.lectern_image_destroy(image);
             };
             self.condition.broadcast(self.io);
             self.mutex.unlock(self.io);
-            c.br_wake();
+            c.lectern_wake();
             self.mutex.lockUncancelable(self.io);
         }
     }
 };
 
-fn convertInput(allocator: std.mem.Allocator, native: c.BR_Input) input.RawInput {
-    defer if (native.path != null) c.br_free(native.path);
+fn convertInput(allocator: std.mem.Allocator, native: c.LECTERN_Input) input.RawInput {
+    defer if (native.path != null) c.lectern_free(native.path);
     var raw = input.RawInput{
         .kind = std.enums.fromInt(input.Kind, native.kind) orelse .none,
         .position = .{ .x = native.x, .y = native.y },
@@ -512,11 +521,11 @@ fn convertInput(allocator: std.mem.Allocator, native: c.BR_Input) input.RawInput
     return raw;
 }
 
-fn toColor(color: theme.Rgba) c.BR_Color {
+fn toColor(color: theme.Rgba) c.LECTERN_Color {
     return .{ .r = color.red, .g = color.green, .b = color.blue, .a = color.alpha };
 }
 
-fn toRect(rect: layout.Rect) c.BR_Rect {
+fn toRect(rect: layout.Rect) c.LECTERN_Rect {
     return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
 }
 
@@ -552,29 +561,29 @@ fn checkSameLayout(comptime Zig: type, comptime Native: type, comptime what: []c
 }
 
 comptime {
-    checkNativeConstants(input.Kind, "BR_INPUT_");
-    checkNativeConstants(input.Key, "BR_KEY_");
-    checkNativeConstants(input.Button, "BR_BUTTON_");
-    checkNativeConstants(theme.Icon, "BR_ICON_");
-    checkSameLayout(layout.Vec2, c.BR_Point, "window point");
-    checkSameLayout(layout.Rect, c.BR_Rect, "rectangle");
-    checkSameLayout(theme.Rgba, c.BR_Color, "color");
-    checkSameLayout(theme.FColor, c.BR_FColor, "vertex color");
+    checkNativeConstants(input.Kind, "LECTERN_INPUT_");
+    checkNativeConstants(input.Key, "LECTERN_KEY_");
+    checkNativeConstants(input.Button, "LECTERN_BUTTON_");
+    checkNativeConstants(theme.Icon, "LECTERN_ICON_");
+    checkSameLayout(layout.Vec2, c.LECTERN_Point, "window point");
+    checkSameLayout(layout.Rect, c.LECTERN_Rect, "rectangle");
+    checkSameLayout(theme.Rgba, c.LECTERN_Color, "color");
+    checkSameLayout(theme.FColor, c.LECTERN_FColor, "vertex color");
     checkSameLayout(u32, c_int, "triangle index");
-    if (theme.icon_size != c.BR_ICON_SIZE) {
+    if (theme.icon_size != c.LECTERN_ICON_SIZE) {
         @compileError("icon size does not match the native bridge");
     }
-    if (layout.default_window.width != c.BR_DEFAULT_WINDOW_WIDTH or
-        layout.default_window.height != c.BR_DEFAULT_WINDOW_HEIGHT)
+    if (layout.default_window.width != c.LECTERN_DEFAULT_WINDOW_WIDTH or
+        layout.default_window.height != c.LECTERN_DEFAULT_WINDOW_HEIGHT)
     {
         @compileError("default window size does not match the native bridge");
     }
-    if (layout.minimum_window.width != c.BR_MINIMUM_WINDOW_WIDTH or
-        layout.minimum_window.height != c.BR_MINIMUM_WINDOW_HEIGHT)
+    if (layout.minimum_window.width != c.LECTERN_MINIMUM_WINDOW_WIDTH or
+        layout.minimum_window.height != c.LECTERN_MINIMUM_WINDOW_HEIGHT)
     {
         @compileError("minimum window size does not match the native bridge");
     }
-    if (layout.maximum_page_pixels > c.BR_MAXIMUM_PAGE_PIXELS) {
+    if (layout.maximum_page_pixels > c.LECTERN_MAXIMUM_PAGE_PIXELS) {
         @compileError("the page pixel policy exceeds the native hard limit");
     }
 }

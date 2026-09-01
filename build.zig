@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
     const test_filter = b.option([]const u8, "test-filter", "Run matching tests only");
     const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
 
-    const core_module = b.addModule("book_read", .{
+    const core_module = b.addModule("lectern", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/application_tests.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "book_read", .module = core_module }},
+            .imports = &.{.{ .name = "lectern", .module = core_module }},
         }),
         .filters = test_filters,
     });
@@ -86,7 +86,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/desktop.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "book_read", .module = core_module }},
+        .imports = &.{.{ .name = "lectern", .module = core_module }},
     });
     addNativeLibraries(b, desktop_module);
 
@@ -105,7 +105,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "book_read", .module = core_module },
+            .{ .name = "lectern", .module = core_module },
             .{ .name = "app", .module = desktop_module },
             .{ .name = "build_options", .module = test_options.createModule() },
         },
@@ -130,7 +130,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "book_read", .module = core_module },
+            .{ .name = "lectern", .module = core_module },
             .{ .name = "app", .module = desktop_module },
         },
     });
@@ -226,7 +226,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseFast,
         .omit_frame_pointer = false,
-        .imports = &.{.{ .name = "book_read", .module = profile_core_module }},
+        .imports = &.{.{ .name = "lectern", .module = profile_core_module }},
     });
     addNativeLibraries(b, profile_desktop_module);
     const profile_module = b.createModule(.{
@@ -239,7 +239,7 @@ pub fn build(b: *std.Build) void {
     profile_module.addIncludePath(b.path("src"));
     profile_module.linkSystemLibrary("sdl3", .{});
     const profile_executable = b.addExecutable(.{
-        .name = "book-read-profile",
+        .name = "lectern-profile",
         .root_module = profile_module,
     });
     const profile_step = b.step("profile", "Build the headless profiling workload");
@@ -263,12 +263,12 @@ fn addExecutable(b: *std.Build, options: ExecutableOptions) *std.Build.Step.Comp
         .root_source_file = b.path("src/main.zig"),
         .target = options.target,
         .optimize = options.optimize,
-        .imports = &.{.{ .name = "book_read", .module = options.core_module }},
+        .imports = &.{.{ .name = "lectern", .module = options.core_module }},
     });
     addNativeLibraries(b, root_module);
 
     return b.addExecutable(.{
-        .name = "book-read",
+        .name = "lectern",
         .root_module = root_module,
     });
 }

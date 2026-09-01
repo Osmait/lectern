@@ -20,5 +20,5 @@ test "baseName handles roots, repeated separators, and Unicode bytes" {
     try std.testing.expectEqualStrings("", baseName("/"));
     try std.testing.expectEqualStrings("", baseName("C:\\"));
     try std.testing.expectEqualStrings("book.pdf", baseName("/library//book.pdf"));
-    try std.testing.expectEqualStrings("libro-ñ.pdf", baseName("/lectura/libro-ñ.pdf"));
+    try std.testing.expectEqualStrings("naïve-ñ.pdf", baseName("/reading/naïve-ñ.pdf"));
 }

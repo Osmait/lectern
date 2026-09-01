@@ -4,7 +4,7 @@
 //! visible lives here, so the core never learns what a color looks like.
 
 const std = @import("std");
-const annotations = @import("book_read").annotations;
+const annotations = @import("lectern").annotations;
 
 /// Matches the native color record byte for byte, so vertex colors can be
 /// handed to the bridge without conversion. The platform adapter checks this.

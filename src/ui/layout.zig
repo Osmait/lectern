@@ -4,7 +4,7 @@
 //! drawing and hit testing always agree by construction.
 
 const std = @import("std");
-const annotations = @import("book_read").annotations;
+const annotations = @import("lectern").annotations;
 
 /// Window points share the native bridge's memory layout, so vertex lists are
 /// handed over without copying. The platform adapter checks the match.

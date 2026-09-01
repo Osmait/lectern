@@ -1,6 +1,6 @@
 # Architecture
 
-Book Read separates portable reading behavior from native desktop services.
+Lectern separates portable reading behavior from native desktop services.
 
 ```text
 src/main.zig  (owns the window, the storage, and the render queue)

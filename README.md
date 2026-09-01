@@ -1,11 +1,11 @@
-# Book Read
+# Lectern
 
-[![CI](https://github.com/Osmait/book-read/actions/workflows/ci.yml/badge.svg)](https://github.com/Osmait/book-read/actions/workflows/ci.yml)
+[![CI](https://github.com/Osmait/lectern/actions/workflows/ci.yml/badge.svg)](https://github.com/Osmait/lectern/actions/workflows/ci.yml)
 
 A native Linux PDF reader written in Zig. It renders real PDF pages with
 Poppler and Cairo and uses SDL3 for the desktop interface.
 
-![Book Read with the annotation margin open beside a page](docs/images/desktop.png)
+![Lectern with the annotation margin open beside a page](docs/images/desktop.png)
 
 *Reading with the annotation margin open: pen and eraser tabs, ink swatches,
 stroke widths, undo, clear, and the save indicator. The page rail on the left
@@ -44,8 +44,8 @@ using their native APIs directly.
 - Mouse controls: clickable toolbar, page-edge clicks, and the scroll wheel
 - An idle window costs no CPU: the reader sleeps until input, a timer, or a
   finished render wakes it
-- Progress stored under `$XDG_STATE_HOME/book-read` or
-  `~/.local/state/book-read`
+- Progress stored under `$XDG_STATE_HOME/lectern` or
+  `~/.local/state/lectern`
 
 ## Supported platform
 
@@ -142,7 +142,8 @@ Everything lives in the state directory:
 | `<hash>.state.notes` | Annotations of one document |
 
 Files are written atomically, so an interrupted save never damages the previous
-version. The `--smoke-test` mode uses a temporary directory instead and
+version. State saved by earlier versions under `book-read` is moved to
+`lectern` the first time the renamed reader starts. The `--smoke-test` mode uses a temporary directory instead and
 deletes it afterwards, so it never touches these files.
 
 ## Development

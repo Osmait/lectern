@@ -113,7 +113,7 @@ fn now(io: std.Io) std.Io.Timestamp {
 pub fn main(init: std.process.Init) !void {
     const arguments = try init.minimal.args.toSlice(init.arena.allocator());
     if (arguments.len != 2) {
-        std.log.err("usage: book-read-profile PDF", .{});
+        std.log.err("usage: lectern-profile PDF", .{});
         return error.InvalidArguments;
     }
 

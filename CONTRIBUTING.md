@@ -1,6 +1,6 @@
-# Contributing to Book Read
+# Contributing to Lectern
 
-Thank you for helping improve Book Read. Changes should be understandable,
+Thank you for helping improve Lectern. Changes should be understandable,
 testable, and small enough to review with confidence.
 
 ## Development setup

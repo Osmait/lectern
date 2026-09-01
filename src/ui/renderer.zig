@@ -6,8 +6,8 @@
 //! are tessellated once per page revision and drawn as one batch.
 
 const std = @import("std");
-const book_read = @import("book_read");
-const annotations = book_read.annotations;
+const lectern = @import("lectern");
+const annotations = lectern.annotations;
 const layout_module = @import("layout.zig");
 const theme_module = @import("theme.zig");
 const geometry = @import("geometry.zig");
@@ -165,7 +165,7 @@ pub fn Renderer(comptime backend: type) type {
                 context,
                 layout_module.wordmark_x,
                 layout_module.wordmark_y,
-                "BOOK READ",
+                "LECTERN",
                 15,
                 true,
                 palette.header_text,
@@ -1178,7 +1178,7 @@ test "titles are truncated on codepoint boundaries using measured widths" {
     const short = renderer.truncatedTitle(context, "book.pdf", 1000, 15);
     try std.testing.expectEqualStrings("book.pdf", short);
 
-    const long = "lectura-" ++ "ñ" ** 36 ++ ".pdf";
+    const long = "reading-" ++ "ñ" ** 36 ++ ".pdf";
     const truncated = renderer.truncatedTitle(context, long, 120, 15);
     try std.testing.expect(truncated.len < long.len);
     try std.testing.expect(std.mem.endsWith(u8, truncated, "..."));

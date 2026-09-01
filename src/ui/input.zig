@@ -4,7 +4,7 @@
 //! This module decides what those facts mean for the reader.
 
 const std = @import("std");
-const annotations = @import("book_read").annotations;
+const annotations = @import("lectern").annotations;
 const commands = @import("../commands.zig");
 const layout_module = @import("layout.zig");
 

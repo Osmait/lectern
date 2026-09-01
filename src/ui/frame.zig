@@ -1,7 +1,7 @@
 //! What one frame of the interface shows. The application fills this in and
 //! the renderer draws it, so the renderer never reads application state.
 
-const annotations = @import("book_read").annotations;
+const annotations = @import("lectern").annotations;
 const layout = @import("layout.zig");
 
 pub const SaveStatus = enum {

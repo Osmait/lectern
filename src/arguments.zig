@@ -22,7 +22,7 @@ pub fn parse(arguments: []const [:0]const u8) error{InvalidArguments}!RunOptions
 }
 
 test "command line accepts interactive, direct, and smoke-test modes" {
-    const executable: [:0]const u8 = "book-read";
+    const executable: [:0]const u8 = "lectern";
     const document: [:0]const u8 = "book.pdf";
     const smoke_test: [:0]const u8 = "--smoke-test";
 
@@ -38,7 +38,7 @@ test "command line accepts interactive, direct, and smoke-test modes" {
 }
 
 test "command line rejects incomplete and unknown options" {
-    const executable: [:0]const u8 = "book-read";
+    const executable: [:0]const u8 = "lectern";
     const smoke_test: [:0]const u8 = "--smoke-test";
     const unknown: [:0]const u8 = "--unknown";
 
@@ -47,7 +47,7 @@ test "command line rejects incomplete and unknown options" {
 }
 
 test "command line rejects extra arguments and option-shaped paths" {
-    const executable: [:0]const u8 = "book-read";
+    const executable: [:0]const u8 = "lectern";
     const document: [:0]const u8 = "book.pdf";
     const extra: [:0]const u8 = "extra.pdf";
     const option_path: [:0]const u8 = "--book.pdf";

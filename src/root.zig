@@ -1,4 +1,4 @@
-//! Public root of Book Read's platform-independent core.
+//! Public root of Lectern's platform-independent core.
 
 pub const Reader = @import("reader.zig").Reader;
 pub const baseName = @import("path_helpers.zig").baseName;

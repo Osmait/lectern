@@ -1,7 +1,7 @@
 //! Typed user commands. Input translation produces them and the application
 //! executes them, so neither side needs to know about SDL or window geometry.
 
-const annotations = @import("book_read").annotations;
+const annotations = @import("lectern").annotations;
 
 pub const Command = union(enum) {
     quit,

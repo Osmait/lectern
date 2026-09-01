@@ -1,6 +1,6 @@
 # Testing strategy
 
-Book Read tests behavior at the narrowest layer that owns it. A feature is not
+Lectern tests behavior at the narrowest layer that owns it. A feature is not
 complete until its normal behavior, expected failures, and relevant boundaries
 are represented in the matrix below.
 

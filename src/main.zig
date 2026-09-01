@@ -7,7 +7,7 @@ const desktop = @import("desktop.zig");
 pub fn main(init: std.process.Init) !void {
     const arguments = try init.minimal.args.toSlice(init.arena.allocator());
     const options = desktop.arguments.parse(arguments) catch |err| {
-        std.log.err("usage: book-read [PDF] | book-read --smoke-test PDF", .{});
+        std.log.err("usage: lectern [PDF] | lectern --smoke-test PDF", .{});
         return err;
     };
 

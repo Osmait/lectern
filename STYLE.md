@@ -1,6 +1,6 @@
-# Book Read code style
+# Lectern code style
 
-Book Read follows Zig's standard style and borrows a small set of proven
+Lectern follows Zig's standard style and borrows a small set of proven
 conventions from TigerBeetle and Ghostty.
 
 ## Principles

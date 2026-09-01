@@ -1,5 +1,5 @@
 ---
-name: Book Read
+name: Lectern
 description: A calm native PDF desk with a contextual scholar's margin.
 colors:
   linen-shell: "#171717"
@@ -89,13 +89,13 @@ components:
     height: "44px"
 ---
 
-# Design System: Book Read
+# Design System: Lectern
 
 ## Overview
 
 **Creative North Star: "The Scholar's Margin"**
 
-Book Read is a calm native reading desk. The PDF stays dominant while a
+Lectern is a calm native reading desk. The PDF stays dominant while a
 contextual paper margin carries the tools needed to write, erase, undo, and
 confirm local persistence. The visual world combines a linen-dark application
 shell with warm uncoated paper, graphite rules, and precise editorial color.

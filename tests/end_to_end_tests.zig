@@ -7,9 +7,9 @@
 //! exercised without a display.
 
 const std = @import("std");
-const book_read = @import("book_read");
+const lectern = @import("lectern");
 const app = @import("app");
-const annotations = book_read.annotations;
+const annotations = lectern.annotations;
 const DocumentKey = app.storage.DocumentKey;
 
 const c = @cImport({

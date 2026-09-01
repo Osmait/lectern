@@ -111,12 +111,14 @@ pub const Storage = struct {
 
     /// Opens or creates the state directory. When no location is available
     /// the storage stays usable and simply reports every file as missing.
+    /// State written under the application's former name is adopted once.
     pub fn open(io: std.Io, allocator: std.mem.Allocator, options: Options) Storage {
-        const directory = stateDirectory(allocator, options) orelse {
+        const directory = stateDirectory(allocator, options, directory_name) orelse {
             std.log.warn("no state directory available; progress will not be saved", .{});
             return unavailable(io, allocator);
         };
         defer allocator.free(directory);
+        adoptFormerDirectory(io, allocator, options, directory);
         const dir = std.Io.Dir.cwd().createDirPathOpen(io, directory, .{}) catch |err| {
             std.log.warn("could not open state directory {s}: {s}", .{
                 directory,
@@ -144,7 +146,7 @@ pub const Storage = struct {
         };
         var temporary = Temporary{ .parent = parent, .name = undefined, .name_length = 0 };
         const stamp: u96 = @bitCast(std.Io.Clock.real.now(io).toNanoseconds());
-        const name = std.fmt.bufPrint(&temporary.name, "book-read-smoke-{x}", .{
+        const name = std.fmt.bufPrint(&temporary.name, "lectern-smoke-{x}", .{
             @as(u64, @truncate(stamp)),
         }) catch unreachable;
         temporary.name_length = name.len;
@@ -275,7 +277,7 @@ pub const Storage = struct {
             return;
         };
         // The name only helps profilers and debuggers tell threads apart.
-        thread.setName(self.io, "br-storage") catch {};
+        thread.setName(self.io, "lectern-storage") catch {};
         self.thread = thread;
     }
 
@@ -333,18 +335,55 @@ pub const Storage = struct {
     }
 };
 
-fn stateDirectory(allocator: std.mem.Allocator, options: Storage.Options) ?[]u8 {
+/// The state directory under `XDG_STATE_HOME` or `~/.local/state`.
+pub const directory_name = "lectern";
+/// The name the application had before; its state is moved over on the
+/// first start, so progress, bookmarks, and notes survive the rename.
+pub const former_directory_name = "book-read";
+
+fn stateDirectory(
+    allocator: std.mem.Allocator,
+    options: Storage.Options,
+    name: []const u8,
+) ?[]u8 {
     if (options.xdg_state_home) |xdg| {
         if (xdg.len > 0) {
-            return std.fmt.allocPrint(allocator, "{s}/book-read", .{xdg}) catch null;
+            return std.fmt.allocPrint(allocator, "{s}/{s}", .{ xdg, name }) catch null;
         }
     }
     if (options.home) |home| {
         if (home.len > 0) {
-            return std.fmt.allocPrint(allocator, "{s}/.local/state/book-read", .{home}) catch null;
+            const path = std.fmt.allocPrint(allocator, "{s}/.local/state/{s}", .{ home, name });
+            return path catch null;
         }
     }
     return null;
+}
+
+/// Renames the former state directory to the current one when the current
+/// one does not exist yet. Any failure leaves both directories alone; the
+/// reader then simply starts without the old state.
+fn adoptFormerDirectory(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    options: Storage.Options,
+    directory: []const u8,
+) void {
+    const former = stateDirectory(allocator, options, former_directory_name) orelse return;
+    defer allocator.free(former);
+    const cwd = std.Io.Dir.cwd();
+    cwd.access(io, directory, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            cwd.access(io, former, .{}) catch return;
+            cwd.rename(former, cwd, directory, io) catch |rename_error| {
+                std.log.warn("could not adopt the state in {s}: {s}", .{
+                    former,
+                    @errorName(rename_error),
+                });
+            };
+        },
+        else => {},
+    };
 }
 
 test "document keys derive stable names from the document path" {
@@ -433,7 +472,7 @@ test "storage resolves the state directory from the environment" {
     };
     defer std.testing.allocator.free(data);
     try std.testing.expectEqualStrings("dark 0\n", data);
-    try tmp.dir.access(std.testing.io, "book-read/preferences", .{});
+    try tmp.dir.access(std.testing.io, "lectern/preferences", .{});
 
     var fallback = Storage.open(std.testing.io, std.testing.allocator, .{
         .xdg_state_home = "",
@@ -443,7 +482,7 @@ test "storage resolves the state directory from the environment" {
     try std.testing.expect(fallback.isAvailable());
     try fallback.write("a", "b");
     fallback.flush();
-    try tmp.dir.access(std.testing.io, ".local/state/book-read/a", .{});
+    try tmp.dir.access(std.testing.io, ".local/state/lectern/a", .{});
 }
 
 test "temporary storage lives in its own directory and disappears on deinit" {
@@ -460,7 +499,7 @@ test "temporary storage lives in its own directory and disappears on deinit" {
     var created: usize = 0;
     var entries = tmp.dir.iterate();
     while (try entries.next(std.testing.io)) |entry| {
-        try std.testing.expect(std.mem.startsWith(u8, entry.name, "book-read-smoke-"));
+        try std.testing.expect(std.mem.startsWith(u8, entry.name, "lectern-smoke-"));
         created += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), created);
@@ -468,6 +507,46 @@ test "temporary storage lives in its own directory and disappears on deinit" {
     storage.deinit();
     var remaining = tmp.dir.iterate();
     try std.testing.expectEqual(@as(?std.Io.Dir.Entry, null), try remaining.next(std.testing.io));
+}
+
+test "state saved under the former name is adopted once" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    const root = path_buffer[0..length];
+    try tmp.dir.createDirPath(std.testing.io, former_directory_name);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = former_directory_name ++ "/preferences",
+        .data = "dark 0\n",
+    });
+
+    var storage = Storage.open(std.testing.io, std.testing.allocator, .{ .xdg_state_home = root });
+    defer storage.deinit();
+    const data = (try storage.read(std.testing.allocator, "preferences")) orelse {
+        return error.ExpectedAdoptedFile;
+    };
+    defer std.testing.allocator.free(data);
+    try std.testing.expectEqualStrings("dark 0\n", data);
+    try tmp.dir.access(std.testing.io, directory_name ++ "/preferences", .{});
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, former_directory_name, .{}),
+    );
+
+    // Once the current directory exists, an old one left behind is ignored.
+    try tmp.dir.createDirPath(std.testing.io, former_directory_name);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = former_directory_name ++ "/preferences",
+        .data = "dark 1\n",
+    });
+    var again = Storage.open(std.testing.io, std.testing.allocator, .{ .xdg_state_home = root });
+    defer again.deinit();
+    const kept = (try again.read(std.testing.allocator, "preferences")) orelse {
+        return error.ExpectedAdoptedFile;
+    };
+    defer std.testing.allocator.free(kept);
+    try std.testing.expectEqualStrings("dark 0\n", kept);
 }
 
 test "unavailable storage reads nothing and rejects writes" {

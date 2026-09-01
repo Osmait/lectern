@@ -1,6 +1,6 @@
 # Profiling
 
-`zig build profile` builds `zig-out/bin/book-read-profile`: the production
+`zig build profile` builds `zig-out/bin/lectern-profile`: the production
 application driven headlessly through a scripted session. It is compiled
 `ReleaseFast` with frame pointers and debug information, so profilers can
 attribute samples to functions. The session opens the given PDF and runs
@@ -29,10 +29,10 @@ display when the question is about the application's own code:
 zig build profile
 # Headless: no window, SDL software rendering dominates.
 SDL_VIDEODRIVER=dummy perf record -F 1999 -g --call-graph dwarf \
-    -o perf.data -- zig-out/bin/book-read-profile book.pdf
+    -o perf.data -- zig-out/bin/lectern-profile book.pdf
 # Real renderer: a window opens for the duration of the session.
 perf record -F 1999 -g --call-graph dwarf \
-    -o perf.data -- zig-out/bin/book-read-profile book.pdf
+    -o perf.data -- zig-out/bin/lectern-profile book.pdf
 ```
 
 `perf_event_paranoid` must be 2 or lower for user-space sampling.
@@ -46,14 +46,14 @@ inferno-flamegraph --width 1400 < stacks.txt > flamegraph.svg
 
 `inferno` comes from `cargo install inferno`; the FlameGraph Perl scripts
 work the same way. `--tid` gives every thread its own root: the main thread,
-`br-render`, and `br-storage`.
+`lectern-render`, and `lectern-storage`.
 
 ## Reading the result
 
-- Samples inside `book-read-profile` are the Zig code and the C bridge;
-  `perf report --dso book-read-profile --sort symbol` lists them.
-- `br-render` holds Poppler, Cairo, and the dark-mode lookup in
-  `br_pdf_render_image`.
+- Samples inside `lectern-profile` are the Zig code and the C bridge;
+  `perf report --dso lectern-profile --sort symbol` lists them.
+- `lectern-render` holds Poppler, Cairo, and the dark-mode lookup in
+  `lectern_pdf_render_image`.
 - System libraries on Arch ship without frame pointers and with internal
   symbols stripped, so stacks stop at the first SDL or Mesa frame and their
   internals appear as `[libSDL3.so]`. `DEBUGINFOD_URLS` can fetch symbols
@@ -73,10 +73,10 @@ so the whole session uses about a tenth of one core.
 | --- | --- |
 | GPU driver, EGL, and shader cache | about 44 % |
 | SDL3 | about 12 % |
-| Poppler, Cairo, pixman, FreeType, on `br-render` | about 15 % |
-| Book Read, Zig and the C bridge | about 3 % |
+| Poppler, Cairo, pixman, FreeType, on `lectern-render` | about 15 % |
+| Lectern, Zig and the C bridge | about 3 % |
 
-The largest piece of Book Read's own time is the dark-mode inversion of a
+The largest piece of Lectern's own time is the dark-mode inversion of a
 freshly rendered page, on the render thread. On the main thread nothing
 exceeds half a percent; the cost per frame is the draw commands SDL sends to
 the driver, one per texture.

@@ -1,6 +1,6 @@
 # Security policy
 
-Book Read parses untrusted PDF files through system Poppler libraries. Keep the
+Lectern parses untrusted PDF files through system Poppler libraries. Keep the
 operating system and Poppler installation updated.
 
 Please do not publish a suspected security vulnerability in a public issue.

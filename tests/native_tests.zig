@@ -5,12 +5,12 @@
 //! written for manual review.
 
 const std = @import("std");
-const book_read = @import("book_read");
+const lectern = @import("lectern");
 const app = @import("app");
 const build_options = @import("build_options");
 const platform = app.platform;
 const ui = app.ui;
-const annotations = book_read.annotations;
+const annotations = lectern.annotations;
 
 const c = @cImport({
     @cInclude("SDL3/SDL.h");
@@ -280,7 +280,7 @@ test "native documents open, measure, render at any scale, and reject bad pages"
     try std.testing.expectError(error.InvalidPdf, platform.Document.open(
         context,
         std.testing.allocator,
-        "/definitely/missing/book-read-test.pdf",
+        "/definitely/missing/lectern-test.pdf",
     ));
     try std.testing.expect(context.lastError().len > 0);
     try std.testing.expectError(error.InvalidPdf, platform.Document.open(

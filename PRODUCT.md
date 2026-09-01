@@ -8,20 +8,20 @@ adaptive
 
 ## Users
 
-Book Read primarily serves students, researchers, and focused readers working
+Lectern primarily serves students, researchers, and focused readers working
 through long PDF documents. They need to read without distraction, preserve
 their place, and add handwritten notes without altering the source document.
 
 ## Product Purpose
 
-Book Read makes sustained PDF reading and annotation feel fast, private, and
+Lectern makes sustained PDF reading and annotation feel fast, private, and
 effortless. Success means a reader can open a document, immediately resume the
 same reading context, navigate confidently, and capture notes without leaving
 the reading flow.
 
 ## Positioning
 
-Book Read combines a focused native reading experience with local-first,
+Lectern combines a focused native reading experience with local-first,
 non-destructive annotations: the reader owns the files and state, the source
 PDF remains untouched, and essential reading and note-taking do not depend on
 an account or remote service.
@@ -56,7 +56,7 @@ an account or remote service.
 
 ## Brand Commitments
 
-- The product name is Book Read.
+- The product name is Lectern.
 - The product should feel focused and trustworthy rather than distracting.
 - Native performance, privacy, and user ownership of documents and notes are
   part of the product identity.
