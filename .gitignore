@@ -5,3 +5,5 @@ zig-out/
 # Generated design images from the Impeccable tool; run it locally to regenerate.
 .impeccable/mocks/
 .impeccable/review/
+# Interactive state of the Impeccable tool; it changes whenever the tool runs.
+.impeccable/questions/

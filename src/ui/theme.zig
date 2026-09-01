@@ -1,8 +1,19 @@
-//! Color palettes and icon identities.
+//! Color palettes, ink colors, pen widths, and icon identities.
+//!
+//! Everything that turns a persisted annotation identity into something
+//! visible lives here, so the core never learns what a color looks like.
 
+const std = @import("std");
 const annotations = @import("book_read").annotations;
 
-pub const Rgba = annotations.Rgba;
+/// Matches the native color record byte for byte, so vertex colors can be
+/// handed to the bridge without conversion. The platform adapter checks this.
+pub const Rgba = extern struct {
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+};
 
 pub const white: Rgba = rgb(255, 255, 255);
 
@@ -23,6 +34,8 @@ pub const Palette = struct {
     accent: Rgba,
     danger: Rgba,
     success: Rgba,
+    /// Stands in for a page whose rasterization has not arrived yet.
+    paper: Rgba,
 
     pub fn forMode(dark_mode: bool) Palette {
         if (dark_mode) {
@@ -39,6 +52,7 @@ pub const Palette = struct {
                 .accent = rgb(35, 99, 216),
                 .danger = rgb(213, 82, 76),
                 .success = rgb(48, 164, 108),
+                .paper = rgb(36, 38, 43),
             };
         }
         return .{
@@ -54,9 +68,32 @@ pub const Palette = struct {
             .accent = rgb(35, 99, 216),
             .danger = rgb(202, 51, 46),
             .success = rgb(41, 155, 99),
+            .paper = white,
         };
     }
 };
+
+/// Ink color for rendering. Black ink is unreadable on an inverted page, so
+/// dark mode renders it as near-white; swatches use the same rule.
+pub fn inkColor(color: annotations.Color, dark_mode: bool) Rgba {
+    return switch (color) {
+        .blue => rgb(47, 111, 219),
+        .red => rgb(217, 79, 74),
+        .black => if (dark_mode) rgb(235, 235, 235) else rgb(25, 28, 32),
+        .yellow => rgb(243, 195, 65),
+        .green => rgb(62, 153, 101),
+        .purple => rgb(132, 91, 173),
+    };
+}
+
+/// Stroke width in logical pixels.
+pub fn penWidth(size: annotations.PenSize) f32 {
+    return switch (size) {
+        .thin => 2.0,
+        .medium => 4.0,
+        .thick => 8.0,
+    };
+}
 
 /// Tag values match the native bridge; the platform adapter verifies them.
 pub const Icon = enum(u8) {
@@ -85,6 +122,17 @@ pub const icon_size: f32 = 40;
 test "palettes differ only where the theme requires" {
     const dark = Palette.forMode(true);
     const light = Palette.forMode(false);
-    try @import("std").testing.expectEqual(dark.accent, light.accent);
-    try @import("std").testing.expect(dark.background.red < light.background.red);
+    try std.testing.expectEqual(dark.accent, light.accent);
+    try std.testing.expect(dark.background.red < light.background.red);
+    try std.testing.expect(dark.paper.red < light.paper.red);
+}
+
+test "ink colors and pen widths stay stable" {
+    try std.testing.expectEqual(@as(u8, 47), inkColor(.blue, false).red);
+    try std.testing.expectEqual(@as(u8, 153), inkColor(.green, true).green);
+    try std.testing.expectEqual(@as(u8, 25), inkColor(.black, false).red);
+    try std.testing.expectEqual(@as(u8, 235), inkColor(.black, true).red);
+    try std.testing.expectEqual(@as(f32, 2), penWidth(.thin));
+    try std.testing.expectEqual(@as(f32, 4), penWidth(.medium));
+    try std.testing.expectEqual(@as(f32, 8), penWidth(.thick));
 }

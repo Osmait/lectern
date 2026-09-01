@@ -2,7 +2,12 @@
 //!
 //! Strokes are stored per page so drawing and erasing only touch the current
 //! page. Every stroke keeps a bounding box so eraser hit tests reject most
-//! strokes before walking their segments.
+//! strokes before walking their segments. The notebook counts a revision on
+//! every change to finished strokes, so a renderer can cache their geometry
+//! and rebuild it only when the revision moves.
+//!
+//! Colors, pen widths, and labels are interface decisions and live in the
+//! interface layer; this module only knows the identities that are persisted.
 
 const std = @import("std");
 
@@ -15,13 +20,6 @@ const point_record_size = 8;
 pub const Point = extern struct {
     x: f32,
     y: f32,
-};
-
-pub const Rgba = extern struct {
-    red: u8,
-    green: u8,
-    blue: u8,
-    alpha: u8,
 };
 
 /// Tag values are written to the annotation file. Never renumber or reorder
@@ -48,33 +46,6 @@ pub const Color = enum(u8) {
             .yellow => .blue,
         };
     }
-
-    /// Ink color for rendering. Black ink is unreadable on an inverted page,
-    /// so dark mode renders it as near-white; swatches use the same rule.
-    pub fn rgba(self: Color, dark_mode: bool) Rgba {
-        return switch (self) {
-            .blue => .{ .red = 47, .green = 111, .blue = 219, .alpha = 255 },
-            .red => .{ .red = 217, .green = 79, .blue = 74, .alpha = 255 },
-            .black => if (dark_mode)
-                .{ .red = 235, .green = 235, .blue = 235, .alpha = 255 }
-            else
-                .{ .red = 25, .green = 28, .blue = 32, .alpha = 255 },
-            .yellow => .{ .red = 243, .green = 195, .blue = 65, .alpha = 255 },
-            .green => .{ .red = 62, .green = 153, .blue = 101, .alpha = 255 },
-            .purple => .{ .red = 132, .green = 91, .blue = 173, .alpha = 255 },
-        };
-    }
-
-    pub fn label(self: Color) []const u8 {
-        return switch (self) {
-            .blue => "BLUE",
-            .red => "RED",
-            .black => "BLACK",
-            .yellow => "YELLOW",
-            .green => "GREEN",
-            .purple => "PURPLE",
-        };
-    }
 };
 
 /// Tag values are written to the annotation file. Never renumber them.
@@ -92,36 +63,12 @@ pub const PenSize = enum(u8) {
             .thick => .thin,
         };
     }
-
-    pub fn pixels(self: PenSize) f32 {
-        return switch (self) {
-            .thin => 2.0,
-            .medium => 4.0,
-            .thick => 8.0,
-        };
-    }
-
-    pub fn label(self: PenSize) []const u8 {
-        return switch (self) {
-            .thin => "THIN",
-            .medium => "MEDIUM",
-            .thick => "THICK",
-        };
-    }
 };
 
 pub const Tool = enum {
     off,
     pen,
     eraser,
-
-    pub fn label(self: Tool) []const u8 {
-        return switch (self) {
-            .off => "NOTES OFF",
-            .pen => "PEN",
-            .eraser => "ERASER",
-        };
-    }
 };
 
 pub const Bounds = struct {
@@ -160,6 +107,30 @@ pub const Stroke = struct {
     bounds: Bounds,
 };
 
+/// Errors of the editing operations. They are explicit so callers can switch
+/// on them exhaustively.
+pub const EditError = error{ InvalidPoint, TooManyPoints, OutOfMemory };
+pub const SerializeError = error{ TooManyPoints, TooManyStrokes, InvalidPage, OutOfMemory };
+pub const RestoreError = error{
+    InvalidMagic,
+    TooManyStrokes,
+    InvalidColor,
+    InvalidPenSize,
+    InvalidPointCount,
+    TruncatedData,
+    TrailingData,
+    InvalidPoint,
+    OutOfMemory,
+};
+
+/// Outcome of a successful restore. Strokes that pointed at pages beyond the
+/// open document were skipped, which happens when the PDF was replaced by a
+/// shorter revision.
+pub const Restored = struct {
+    restored: usize = 0,
+    skipped: usize = 0,
+};
+
 const StrokeList = std.ArrayList(Stroke);
 
 pub const Notebook = struct {
@@ -172,6 +143,10 @@ pub const Notebook = struct {
     tool: Tool = .off,
     color: Color = .blue,
     pen_size: PenSize = .medium,
+    /// Moves whenever the finished strokes of any page change. Tool, color,
+    /// and size selections do not count because they do not alter what is
+    /// already on a page.
+    revision: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) Notebook {
         return .{ .allocator = allocator };
@@ -185,18 +160,20 @@ pub const Notebook = struct {
 
     /// Prepares empty per-page storage for a document. Tool settings survive
     /// because they belong to the user, not to the document.
-    pub fn open(self: *Notebook, page_count: usize) !void {
+    pub fn open(self: *Notebook, page_count: usize) error{OutOfMemory}!void {
         const next_pages = try self.allocator.alloc(StrokeList, page_count);
         for (next_pages) |*page| page.* = .empty;
         self.cancelStroke();
         freePages(self.allocator, self.pages);
         self.pages = next_pages;
+        self.touch();
     }
 
     pub fn close(self: *Notebook) void {
         self.cancelStroke();
         freePages(self.allocator, self.pages);
         self.pages = &.{};
+        self.touch();
     }
 
     pub fn isOpen(self: Notebook) bool {
@@ -257,7 +234,7 @@ pub const Notebook = struct {
         return self.active_points.items;
     }
 
-    pub fn beginStroke(self: *Notebook, page_index: usize, point: Point) !bool {
+    pub fn beginStroke(self: *Notebook, page_index: usize, point: Point) EditError!bool {
         if (self.tool != .pen or page_index >= self.pages.len) return false;
         try validatePoint(point);
         self.cancelStroke();
@@ -266,7 +243,7 @@ pub const Notebook = struct {
         return true;
     }
 
-    pub fn appendPoint(self: *Notebook, point: Point) !bool {
+    pub fn appendPoint(self: *Notebook, point: Point) EditError!bool {
         if (self.tool != .pen or self.active_points.items.len == 0) return false;
         try validatePoint(point);
         if (self.active_points.items.len >= maximum_point_count) {
@@ -279,7 +256,7 @@ pub const Notebook = struct {
         return true;
     }
 
-    pub fn finishStroke(self: *Notebook) !bool {
+    pub fn finishStroke(self: *Notebook) EditError!bool {
         if (self.active_points.items.len == 0) return false;
         if (self.active_page_index >= self.pages.len) {
             self.cancelStroke();
@@ -293,6 +270,7 @@ pub const Notebook = struct {
             .points = points,
             .bounds = Bounds.ofPoints(points),
         });
+        self.touch();
         return true;
     }
 
@@ -315,6 +293,7 @@ pub const Notebook = struct {
 
             const removed = page.orderedRemove(stroke_index);
             self.allocator.free(removed.points);
+            self.touch();
             return true;
         }
         return false;
@@ -324,6 +303,7 @@ pub const Notebook = struct {
         if (page_index >= self.pages.len) return false;
         const removed = self.pages[page_index].pop() orelse return false;
         self.allocator.free(removed.points);
+        self.touch();
         return true;
     }
 
@@ -333,10 +313,11 @@ pub const Notebook = struct {
         if (page.items.len == 0) return false;
         for (page.items) |stroke| self.allocator.free(stroke.points);
         page.clearRetainingCapacity();
+        self.touch();
         return true;
     }
 
-    pub fn serialize(self: Notebook, allocator: std.mem.Allocator) ![]u8 {
+    pub fn serialize(self: Notebook, allocator: std.mem.Allocator) SerializeError![]u8 {
         var stroke_total: usize = 0;
         var point_total: usize = 0;
         for (self.pages) |page| {
@@ -377,12 +358,15 @@ pub const Notebook = struct {
 
     /// Replaces every stroke with the serialized contents. The notebook must
     /// already be open for the same document, because page indices are checked
-    /// against the page count. On any error the current strokes are kept.
-    pub fn restore(self: *Notebook, data: []const u8) !void {
+    /// against the page count. Strokes on pages beyond the document are
+    /// skipped and counted, like progress entries for missing pages; every
+    /// other defect rejects the file and keeps the current strokes.
+    pub fn restore(self: *Notebook, data: []const u8) RestoreError!Restored {
         const next_pages = try self.allocator.alloc(StrokeList, self.pages.len);
         for (next_pages) |*page| page.* = .empty;
         errdefer freePages(self.allocator, next_pages);
 
+        var result = Restored{};
         var cursor = Cursor{ .data = data };
         const magic = try cursor.readBytes(file_magic.len);
         if (!std.mem.eql(u8, magic, file_magic)) return error.InvalidMagic;
@@ -392,7 +376,6 @@ pub const Notebook = struct {
         var stroke_index: u32 = 0;
         while (stroke_index < stroke_count) : (stroke_index += 1) {
             const page_index = try cursor.readU32();
-            if (page_index >= next_pages.len) return error.InvalidPage;
             const color = std.enums.fromInt(Color, try cursor.readByte()) orelse {
                 return error.InvalidColor;
             };
@@ -407,14 +390,19 @@ pub const Notebook = struct {
             if (cursor.remaining() / point_record_size < point_count) {
                 return error.TruncatedData;
             }
+            if (page_index >= next_pages.len) {
+                var skipped: u32 = 0;
+                while (skipped < point_count) : (skipped += 1) {
+                    try validatePoint(try readPoint(&cursor));
+                }
+                result.skipped += 1;
+                continue;
+            }
 
             const points = try self.allocator.alloc(Point, point_count);
             errdefer self.allocator.free(points);
             for (points) |*point| {
-                point.* = .{
-                    .x = @bitCast(try cursor.readU32()),
-                    .y = @bitCast(try cursor.readU32()),
-                };
+                point.* = try readPoint(&cursor);
                 try validatePoint(point.*);
             }
             try next_pages[page_index].append(self.allocator, .{
@@ -423,12 +411,19 @@ pub const Notebook = struct {
                 .points = points,
                 .bounds = Bounds.ofPoints(points),
             });
+            result.restored += 1;
         }
         if (!cursor.finished()) return error.TrailingData;
 
         self.cancelStroke();
         freePages(self.allocator, self.pages);
         self.pages = next_pages;
+        self.touch();
+        return result;
+    }
+
+    fn touch(self: *Notebook) void {
+        self.revision +%= 1;
     }
 };
 
@@ -444,17 +439,17 @@ const Cursor = struct {
     data: []const u8,
     index: usize = 0,
 
-    fn readByte(self: *Cursor) !u8 {
+    fn readByte(self: *Cursor) error{TruncatedData}!u8 {
         const bytes = try self.readBytes(1);
         return bytes[0];
     }
 
-    fn readU32(self: *Cursor) !u32 {
+    fn readU32(self: *Cursor) error{TruncatedData}!u32 {
         const bytes = try self.readBytes(4);
         return std.mem.readInt(u32, bytes[0..4], .little);
     }
 
-    fn readBytes(self: *Cursor, byte_count: usize) ![]const u8 {
+    fn readBytes(self: *Cursor, byte_count: usize) error{TruncatedData}![]const u8 {
         if (self.remaining() < byte_count) return error.TruncatedData;
         const end_index = self.index + byte_count;
         defer self.index = end_index;
@@ -470,13 +465,20 @@ const Cursor = struct {
     }
 };
 
+fn readPoint(cursor: *Cursor) error{TruncatedData}!Point {
+    return .{
+        .x = @bitCast(try cursor.readU32()),
+        .y = @bitCast(try cursor.readU32()),
+    };
+}
+
 fn appendU32(output: *std.ArrayList(u8), value: u32) void {
     var bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &bytes, value, .little);
     output.appendSliceAssumeCapacity(&bytes);
 }
 
-fn validatePoint(point: Point) !void {
+fn validatePoint(point: Point) error{InvalidPoint}!void {
     if (!std.math.isFinite(point.x) or !std.math.isFinite(point.y)) {
         return error.InvalidPoint;
     }
@@ -539,6 +541,35 @@ test "a pen stroke can be recorded and finalized on its page" {
     try std.testing.expectEqual(@as(usize, 2), strokes[0].points.len);
     try std.testing.expectApproxEqAbs(@as(f32, 0.1), strokes[0].bounds.min_x, 0.0001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), strokes[0].bounds.max_y, 0.0001);
+}
+
+test "the revision moves only when finished strokes change" {
+    var notebook = Notebook.init(std.testing.allocator);
+    defer notebook.deinit();
+    try notebook.open(2);
+    const opened = notebook.revision;
+
+    notebook.selectPen();
+    notebook.cycleColor();
+    notebook.selectPenSize(.thick);
+    _ = try notebook.beginStroke(0, .{ .x = 0.1, .y = 0.1 });
+    _ = try notebook.appendPoint(.{ .x = 0.2, .y = 0.2 });
+    try std.testing.expectEqual(opened, notebook.revision);
+
+    _ = try notebook.finishStroke();
+    const finished = notebook.revision;
+    try std.testing.expect(finished != opened);
+    try std.testing.expect(!notebook.undoPage(1));
+    try std.testing.expect(!notebook.eraseAt(0, .{ .x = 0.9, .y = 0.9 }));
+    try std.testing.expectEqual(finished, notebook.revision);
+
+    try std.testing.expect(notebook.undoPage(0));
+    try std.testing.expect(notebook.revision != finished);
+    const undone = notebook.revision;
+    _ = try notebook.beginStroke(0, .{ .x = 0.1, .y = 0.1 });
+    _ = try notebook.finishStroke();
+    try std.testing.expect(notebook.clearPage(0));
+    try std.testing.expect(notebook.revision != undone);
 }
 
 test "strokes cannot target pages outside the document" {
@@ -612,7 +643,9 @@ test "serialized annotations round trip without losing style or points" {
     var restored = Notebook.init(std.testing.allocator);
     defer restored.deinit();
     try restored.open(2);
-    try restored.restore(serialized);
+    const result = try restored.restore(serialized);
+    try std.testing.expectEqual(@as(usize, 1), result.restored);
+    try std.testing.expectEqual(@as(usize, 0), result.skipped);
 
     try std.testing.expectEqual(@as(usize, 1), restored.strokeCount());
     const stroke = restored.strokesOn(1)[0];
@@ -649,12 +682,43 @@ test "every ink color survives annotation persistence with stable tags" {
     var restored = Notebook.init(std.testing.allocator);
     defer restored.deinit();
     try restored.open(1);
-    try restored.restore(serialized);
+    _ = try restored.restore(serialized);
 
     try std.testing.expectEqual(colors.len, restored.strokeCount());
     for (colors, restored.strokesOn(0)) |expected, stroke| {
         try std.testing.expectEqual(expected, stroke.color);
     }
+}
+
+test "strokes on pages beyond a shorter document are skipped, not fatal" {
+    var source = Notebook.init(std.testing.allocator);
+    defer source.deinit();
+    try source.open(3);
+    source.selectPen();
+    for ([_]usize{ 0, 2, 2 }) |page_index| {
+        _ = try source.beginStroke(page_index, .{ .x = 0.3, .y = 0.3 });
+        _ = try source.appendPoint(.{ .x = 0.4, .y = 0.4 });
+        _ = try source.finishStroke();
+    }
+    const serialized = try source.serialize(std.testing.allocator);
+    defer std.testing.allocator.free(serialized);
+
+    var shorter = Notebook.init(std.testing.allocator);
+    defer shorter.deinit();
+    try shorter.open(1);
+    const result = try shorter.restore(serialized);
+    try std.testing.expectEqual(@as(usize, 1), result.restored);
+    try std.testing.expectEqual(@as(usize, 2), result.skipped);
+    try std.testing.expectEqual(@as(usize, 1), shorter.strokeCount());
+
+    // Points of skipped strokes are still validated so corruption is caught.
+    const corrupt = try std.testing.allocator.dupe(u8, serialized);
+    defer std.testing.allocator.free(corrupt);
+    const second_stroke_first_point = file_magic.len + 4 + stroke_header_size +
+        2 * point_record_size + stroke_header_size;
+    writeTestU32(corrupt, second_stroke_first_point, @bitCast(@as(f32, -2.0)));
+    try std.testing.expectError(error.InvalidPoint, shorter.restore(corrupt));
+    try std.testing.expectEqual(@as(usize, 1), shorter.strokeCount());
 }
 
 test "invalid annotation data is rejected transactionally" {
@@ -709,22 +773,8 @@ test "tool, color, and size selections cycle predictably and survive reopening" 
     try std.testing.expectEqual(PenSize.thin, notebook.pen_size);
     try std.testing.expectEqual(Tool.pen, notebook.tool);
     try std.testing.expectEqual(@as(usize, 4), notebook.pageCount());
-}
-
-test "annotation option labels and rendering values stay stable" {
-    try std.testing.expectEqualStrings("NOTES OFF", Tool.off.label());
-    try std.testing.expectEqualStrings("PEN", Tool.pen.label());
-    try std.testing.expectEqualStrings("ERASER", Tool.eraser.label());
-    try std.testing.expectEqualStrings("BLUE", Color.blue.label());
-    try std.testing.expectEqualStrings("BLACK", Color.black.label());
-    try std.testing.expectEqual(@as(u8, 47), Color.blue.rgba(false).red);
-    try std.testing.expectEqual(@as(u8, 153), Color.green.rgba(true).green);
-    try std.testing.expectEqual(@as(u8, 25), Color.black.rgba(false).red);
-    try std.testing.expectEqual(@as(u8, 235), Color.black.rgba(true).red);
-    try std.testing.expectEqual(@as(f32, 2), PenSize.thin.pixels());
-    try std.testing.expectEqual(@as(f32, 8), PenSize.thick.pixels());
-    try std.testing.expectEqualStrings("MEDIUM", PenSize.medium.label());
     try std.testing.expectEqual(@as(usize, 5), Color.swatches.len);
+    try std.testing.expectEqual(@as(usize, 3), PenSize.all.len);
 }
 
 test "invalid and duplicate points do not corrupt an active stroke" {
@@ -796,11 +846,6 @@ test "serialized annotations reject corrupt fields and trailing bytes" {
     invalid_magic[0] ^= 0xff;
     try std.testing.expectError(error.InvalidMagic, target.restore(invalid_magic));
 
-    const invalid_page = try std.testing.allocator.dupe(u8, valid);
-    defer std.testing.allocator.free(invalid_page);
-    writeTestU32(invalid_page, 12, 1);
-    try std.testing.expectError(error.InvalidPage, target.restore(invalid_page));
-
     const invalid_color = try std.testing.allocator.dupe(u8, valid);
     defer std.testing.allocator.free(invalid_color);
     invalid_color[16] = 0xff;
@@ -862,7 +907,8 @@ test "empty notebooks serialize and restore as valid state" {
     var restored = Notebook.init(std.testing.allocator);
     defer restored.deinit();
     try restored.open(5);
-    try restored.restore(serialized);
+    const result = try restored.restore(serialized);
+    try std.testing.expectEqual(@as(usize, 0), result.restored);
     try std.testing.expectEqual(@as(usize, 0), restored.strokeCount());
 }
 
@@ -884,7 +930,7 @@ fn exerciseAnnotationAllocations(allocator: std.mem.Allocator) !void {
     var restored = Notebook.init(allocator);
     defer restored.deinit();
     try restored.open(2);
-    try restored.restore(serialized);
+    _ = try restored.restore(serialized);
 }
 
 test "allocation failures do not leak partially built annotations" {

@@ -2,12 +2,17 @@
 //!
 //! C types, ownership rules, and integer constants stop here. The interface
 //! and application layers only see domain values: raw input records, sizes,
-//! rectangles, colors, textures, and documents.
+//! rectangles, colors, textures, documents, and render jobs.
+//!
+//! After a document is opened, only the render worker calls Poppler for it;
+//! page sizes are read once at open time so the main thread never blocks on
+//! a render in progress.
 
 const std = @import("std");
 const book_read = @import("book_read");
 const annotations = book_read.annotations;
 const ui = @import("ui.zig");
+const rendering = @import("rendering.zig");
 const layout = ui.layout;
 const theme = ui.theme;
 const input = ui.input;
@@ -48,7 +53,7 @@ pub const TextImage = struct {
 pub const Context = struct {
     handle: *c.BR_Context,
 
-    pub fn init() !Context {
+    pub fn init() error{WindowInitializationFailed}!Context {
         var error_message: [*c]u8 = null;
         const handle = c.br_init(&error_message) orelse {
             defer if (error_message != null) c.br_free(error_message);
@@ -79,9 +84,18 @@ pub const Context = struct {
         return convertInput(allocator, native);
     }
 
-    pub fn waitInput(self: Context, allocator: std.mem.Allocator, timeout_ms: u32) ?input.RawInput {
+    /// Waits for input; a null timeout waits until an event or a finished
+    /// render wakes the loop.
+    pub fn waitInput(
+        self: Context,
+        allocator: std.mem.Allocator,
+        timeout_ms: ?u32,
+    ) ?input.RawInput {
         var native: c.BR_Input = undefined;
-        const timeout: c_int = @intCast(@min(timeout_ms, std.math.maxInt(c_int)));
+        const timeout: c_int = if (timeout_ms) |milliseconds|
+            @intCast(@min(milliseconds, std.math.maxInt(c_int)))
+        else
+            -1;
         if (c.br_wait_input(self.handle, timeout, &native) == 0) return null;
         return convertInput(allocator, native);
     }
@@ -165,20 +179,23 @@ pub const Context = struct {
         c.br_draw_texture(self.handle, texture.handle, toRect(destination), toColor(tint));
     }
 
+    /// Draws colored triangles. Points, colors, and indices share the
+    /// bridge's memory layout, so nothing is copied here.
     pub fn drawTriangles(
         self: Context,
         vertices: []const layout.Vec2,
-        indices: []const c_int,
-        color: theme.Rgba,
+        colors: []const theme.Rgba,
+        indices: []const u32,
     ) void {
+        std.debug.assert(vertices.len == colors.len);
         if (vertices.len == 0 or indices.len == 0) return;
         c.br_draw_triangles(
             self.handle,
             @ptrCast(vertices.ptr),
+            @ptrCast(colors.ptr),
             vertices.len,
-            indices.ptr,
+            @ptrCast(indices.ptr),
             indices.len,
-            toColor(color),
         );
     }
 
@@ -206,26 +223,49 @@ pub const Context = struct {
         };
         return Texture.fromHandle(handle);
     }
+
+    /// Uploads a page image rendered by the worker. Main thread only.
+    fn textureFromImage(self: Context, image: *c.BR_Image) ?Texture {
+        const handle = c.br_texture_from_image(self.handle, image) orelse return null;
+        return Texture.fromHandle(handle);
+    }
 };
 
 pub const Document = struct {
     handle: *c.BR_Document,
+    allocator: std.mem.Allocator,
+    /// Read once at open time; null for pages Poppler could not measure.
+    page_sizes: []?layout.Size,
 
-    pub fn open(context: Context, allocator: std.mem.Allocator, raw_path: []const u8) !Document {
+    pub fn open(
+        context: Context,
+        allocator: std.mem.Allocator,
+        raw_path: []const u8,
+    ) error{ InvalidPdf, OutOfMemory }!Document {
         const path_z = try allocator.dupeZ(u8, raw_path);
         defer allocator.free(path_z);
         const handle = c.br_pdf_open(context.handle, path_z.ptr) orelse return error.InvalidPdf;
-        return .{ .handle = handle };
+        errdefer c.br_pdf_close(handle);
+
+        const page_count = c.br_pdf_page_count(handle);
+        const page_sizes = try allocator.alloc(?layout.Size, @intCast(@max(page_count, 0)));
+        for (page_sizes, 0..) |*size, index| {
+            var width: f32 = 0;
+            var height: f32 = 0;
+            const found = c.br_pdf_page_size(handle, @intCast(index), &width, &height);
+            size.* = if (found != 0) .{ .width = width, .height = height } else null;
+        }
+        return .{ .handle = handle, .allocator = allocator, .page_sizes = page_sizes };
     }
 
     pub fn deinit(self: *Document) void {
         c.br_pdf_close(self.handle);
+        self.allocator.free(self.page_sizes);
         self.* = undefined;
     }
 
     pub fn pageCount(self: Document) usize {
-        const page_count = c.br_pdf_page_count(self.handle);
-        return if (page_count > 0) @intCast(page_count) else 0;
+        return self.page_sizes.len;
     }
 
     pub fn path(self: Document) []const u8 {
@@ -233,27 +273,25 @@ pub const Document = struct {
     }
 
     pub fn pageSize(self: Document, page_index: usize) ?layout.Size {
-        if (page_index > std.math.maxInt(c_int)) return null;
-        var width: f32 = 0;
-        var height: f32 = 0;
-        const found = c.br_pdf_page_size(self.handle, @intCast(page_index), &width, &height);
-        if (found == 0) return null;
-        return .{ .width = width, .height = height };
+        if (page_index >= self.page_sizes.len) return null;
+        return self.page_sizes[page_index];
     }
 
     /// Distinguishes document instances for caches; reopening a file yields
     /// a new identity so stale thumbnails are never shown.
     pub fn identity(self: Document) u64 {
-        return @intFromPtr(self.handle);
+        return c.br_pdf_identity(self.handle);
     }
 
+    /// Rasterizes and uploads on the calling thread. Used when opening a
+    /// document, before the worker takes over.
     pub fn render(
         self: Document,
         context: Context,
         page_index: usize,
         scale: f32,
         dark_mode: bool,
-    ) !Texture {
+    ) error{PageRenderFailed}!Texture {
         if (page_index > std.math.maxInt(c_int)) return error.PageRenderFailed;
         const handle = c.br_pdf_render(
             context.handle,
@@ -263,6 +301,190 @@ pub const Document = struct {
             @intFromBool(dark_mode),
         ) orelse return error.PageRenderFailed;
         return Texture.fromHandle(handle);
+    }
+
+    /// Rasterizes without touching the window; safe on the worker thread.
+    fn renderImage(self: Document, page_index: usize, scale: f32, dark_mode: bool) ?*c.BR_Image {
+        if (page_index > std.math.maxInt(c_int)) return null;
+        return c.br_pdf_render_image(
+            self.handle,
+            @intCast(page_index),
+            scale,
+            @intFromBool(dark_mode),
+        );
+    }
+};
+
+/// Rasterizes pages on one worker thread. Results wait as images until the
+/// main thread polls them and turns them into textures. A queue must not
+/// move after the first job was submitted, because the worker keeps a
+/// pointer to it.
+pub const RenderQueue = struct {
+    pub const Job = rendering.Job(Document);
+    pub const Result = rendering.Result(Document, Texture);
+
+    const Completed = struct {
+        job: Job,
+        image: ?*c.BR_Image,
+    };
+
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+    pending: std.ArrayList(Job) = .empty,
+    completed: std.ArrayList(Completed) = .empty,
+    running: ?u64 = null,
+    quit: bool = false,
+    thread: ?std.Thread = null,
+    next_id: u64 = 1,
+    /// Jobs rendered on the caller's thread because no worker could start.
+    synchronous_render_count: usize = 0,
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) RenderQueue {
+        return .{ .allocator = allocator, .io = io };
+    }
+
+    pub fn deinit(self: *RenderQueue) void {
+        self.mutex.lockUncancelable(self.io);
+        self.quit = true;
+        self.pending.clearRetainingCapacity();
+        self.condition.broadcast(self.io);
+        self.mutex.unlock(self.io);
+        if (self.thread) |thread| thread.join();
+        for (self.completed.items) |done| c.br_image_destroy(done.image);
+        self.completed.deinit(self.allocator);
+        self.pending.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn submit(self: *RenderQueue, job: Job) error{OutOfMemory}!u64 {
+        var owned = job;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        owned.id = self.next_id;
+        self.next_id += 1;
+        if (self.thread == null) self.startWorkerLocked();
+        if (self.thread == null) {
+            // No worker: render right here so the reader still works.
+            self.synchronous_render_count += 1;
+            const image = owned.document.renderImage(
+                owned.page_index,
+                owned.scale,
+                owned.dark_mode,
+            );
+            errdefer c.br_image_destroy(image);
+            try self.completed.append(self.allocator, .{ .job = owned, .image = image });
+            return owned.id;
+        }
+        try self.pending.append(self.allocator, owned);
+        self.condition.broadcast(self.io);
+        return owned.id;
+    }
+
+    /// Removes a job that has not started. Returns false when it is running
+    /// or already finished; its result then arrives normally.
+    pub fn cancel(self: *RenderQueue, id: u64) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.pending.items, 0..) |job, index| {
+            if (job.id != id) continue;
+            _ = self.pending.orderedRemove(index);
+            return true;
+        }
+        return false;
+    }
+
+    pub fn cancelAll(self: *RenderQueue) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.pending.clearRetainingCapacity();
+    }
+
+    pub fn reprioritize(self: *RenderQueue, id: u64, priority: rendering.Priority) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.pending.items) |*job| {
+            if (job.id == id) job.priority = priority;
+        }
+    }
+
+    pub fn pendingCount(self: *RenderQueue) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.pending.items.len;
+    }
+
+    pub fn isIdle(self: *RenderQueue) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.pending.items.len == 0 and self.running == null;
+    }
+
+    /// Blocks until no job is pending or running. Bounded by one page render.
+    pub fn waitIdle(self: *RenderQueue) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        while (self.pending.items.len > 0 or self.running != null) {
+            self.condition.waitUncancelable(self.io, &self.mutex);
+        }
+    }
+
+    /// Hands over the next finished job of the current generation as a
+    /// texture. Results of earlier generations are released unseen. Main
+    /// thread only, because textures are created here.
+    pub fn poll(self: *RenderQueue, context: Context, generation: u64) ?Result {
+        while (true) {
+            self.mutex.lockUncancelable(self.io);
+            if (self.completed.items.len == 0) {
+                self.mutex.unlock(self.io);
+                return null;
+            }
+            const done = self.completed.orderedRemove(0);
+            self.mutex.unlock(self.io);
+
+            if (done.job.generation != generation) {
+                c.br_image_destroy(done.image);
+                continue;
+            }
+            const image = done.image orelse return .{ .job = done.job, .texture = null };
+            defer c.br_image_destroy(image);
+            return .{ .job = done.job, .texture = context.textureFromImage(image) };
+        }
+    }
+
+    fn startWorkerLocked(self: *RenderQueue) void {
+        self.thread = std.Thread.spawn(.{}, worker, .{self}) catch |err| {
+            std.log.warn("could not start the render thread: {s}", .{@errorName(err)});
+            return;
+        };
+    }
+
+    fn worker(self: *RenderQueue) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        while (true) {
+            const index = rendering.nextJobIndex(Document, self.pending.items) orelse {
+                if (self.quit) return;
+                self.condition.waitUncancelable(self.io, &self.mutex);
+                continue;
+            };
+            const job = self.pending.orderedRemove(index);
+            self.running = job.id;
+            self.mutex.unlock(self.io);
+
+            const image = job.document.renderImage(job.page_index, job.scale, job.dark_mode);
+
+            self.mutex.lockUncancelable(self.io);
+            self.running = null;
+            self.completed.append(self.allocator, .{ .job = job, .image = image }) catch {
+                c.br_image_destroy(image);
+            };
+            self.condition.broadcast(self.io);
+            self.mutex.unlock(self.io);
+            c.br_wake();
+            self.mutex.lockUncancelable(self.io);
+        }
     }
 };
 
@@ -278,7 +500,9 @@ fn convertInput(allocator: std.mem.Allocator, native: c.BR_Input) input.RawInput
     };
     if (native.path != null) {
         raw.path = allocator.dupe(u8, std.mem.span(native.path)) catch {
-            std.log.err("could not keep the dropped path", .{});
+            // The drop is lost but the reader keeps running; nothing else
+            // depends on it, so this is a warning like every handled failure.
+            std.log.warn("could not keep the dropped path", .{});
             return .{ .kind = .none };
         };
     }
@@ -316,17 +540,37 @@ fn checkNativeConstants(comptime Enum: type, comptime prefix: []const u8) void {
     }
 }
 
+fn checkSameLayout(comptime Zig: type, comptime Native: type, comptime what: []const u8) void {
+    comptime {
+        if (@sizeOf(Zig) != @sizeOf(Native) or @alignOf(Zig) != @alignOf(Native)) {
+            @compileError(what ++ " ABI does not match the native bridge");
+        }
+    }
+}
+
 comptime {
     checkNativeConstants(input.Kind, "BR_INPUT_");
     checkNativeConstants(input.Key, "BR_KEY_");
     checkNativeConstants(input.Button, "BR_BUTTON_");
     checkNativeConstants(theme.Icon, "BR_ICON_");
-    if (@sizeOf(layout.Vec2) != @sizeOf(c.BR_Point) or
-        @alignOf(layout.Vec2) != @alignOf(c.BR_Point))
-    {
-        @compileError("window point ABI does not match the native bridge");
-    }
+    checkSameLayout(layout.Vec2, c.BR_Point, "window point");
+    checkSameLayout(layout.Rect, c.BR_Rect, "rectangle");
+    checkSameLayout(theme.Rgba, c.BR_Color, "color");
+    checkSameLayout(u32, c_int, "triangle index");
     if (theme.icon_size != c.BR_ICON_SIZE) {
         @compileError("icon size does not match the native bridge");
+    }
+    if (layout.default_window.width != c.BR_DEFAULT_WINDOW_WIDTH or
+        layout.default_window.height != c.BR_DEFAULT_WINDOW_HEIGHT)
+    {
+        @compileError("default window size does not match the native bridge");
+    }
+    if (layout.minimum_window.width != c.BR_MINIMUM_WINDOW_WIDTH or
+        layout.minimum_window.height != c.BR_MINIMUM_WINDOW_HEIGHT)
+    {
+        @compileError("minimum window size does not match the native bridge");
+    }
+    if (layout.maximum_page_pixels > c.BR_MAXIMUM_PAGE_PIXELS) {
+        @compileError("the page pixel policy exceeds the native hard limit");
     }
 }

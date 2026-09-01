@@ -7,16 +7,18 @@ are represented in the matrix below.
 | Owner | Happy paths | Failure paths | Boundary and lifecycle cases |
 | --- | --- | --- | --- |
 | `reader.zig` | Open, navigation, zoom, bookmarks | Empty documents, allocation failure | Closed state, page and zoom limits, bookmark wraparound, reopen |
-| `annotations.zig` | Pen, erase, undo, clear, option cycles, round trip | Invalid points, corrupt fields, allocation failure | Empty notes, duplicate points, wrong pages, size limits, transactional restore, stable tags |
-| `progress.zig`, `preferences.zig` | Round trips | Corrupt lines | Legacy theme lines, closed readers |
+| `annotations.zig` | Pen, erase, undo, clear, option cycles, round trip, revision | Invalid points, corrupt fields, allocation failure | Empty notes, duplicate points, pages beyond a shorter document, size limits, transactional restore, stable tags |
+| `progress.zig`, `preferences.zig`, `key_value.zig` | Round trips | Corrupt lines | Legacy theme lines, closed readers, empty input |
 | `path_helpers.zig` | Unix and Windows names | Empty input | Roots, trailing and repeated separators, Unicode bytes |
-| `main.zig` | Interactive, direct PDF, smoke mode | Unknown and incomplete options | Extra arguments, option-shaped paths, empty argument vector |
-| `application.zig` | Open, restore, replace, commands, timers, autosave, theme and tool persistence | Open, render, storage, and allocation failures | Rollback, corrupt notes, wait timeouts, hover repaints, stale page scale, smoke requirements |
-| `ui/layout.zig` | Toolbar, panel, rail, page rectangle | Points outside every region | No overlapping buttons at any width, quarter edges, scroll clamps |
-| `ui/input.zig` | Keys, clicks, wheel, drags, files | Unknown keys, empty paths | Strokes closed by hovers, hidden rail, page rectangle edges |
-| `ui/renderer.zig` and caches | Every surface, cache hits, budgets | Text creation failure, render failure | Eviction, invalidation, codepoint-safe truncation |
-| `storage.zig` | Read, atomic write, environment resolution | Unavailable directory | Overwrite, missing files, stable names |
-| `platform.zig` and `bridge.c` | Raw input, PDF render, text and icons, screenshots | Missing PDF, invalid page, oversized scale | Poll sentinel, density, window ids |
+| `arguments.zig` | Interactive, direct PDF, smoke mode | Unknown and incomplete options | Extra arguments, option-shaped paths, empty argument vector |
+| `application.zig` | Open, restore, replace, commands, timers, autosave, theme and tool persistence, page cache, prefetch | Open, render, storage, and allocation failures | Dropped results of replaced documents, failed pages reported once, corrupt and oversized notes, wait timeouts, hover repaints, cached layout, resize debounce, repaint-only-on-change, smoke requirements |
+| `rendering.zig`, `page_cache.zig` | Job ordering, cache hits within tolerance | Zero scales | Priority ties, bounded eviction, page replacement |
+| `ui/layout.zig` | Toolbar, panel, rail, page rectangle, hover | Points outside every region | No overlapping buttons at any width, panel rows that never overlap from the minimum window height upward, quarter edges, scroll clamps |
+| `ui/input.zig` | Keys, clicks, wheel, drags, files | Unknown keys, empty paths | Strokes closed by hovers, hidden rail, page rectangle edges, wake and leave events |
+| `ui/renderer.zig` and caches | Every surface, cache hits, stroke geometry reuse, batched swatches | Text creation failure, render failure | Eviction, invalidation, late thumbnail results, placeholder pages, codepoint-safe truncation |
+| `ui/geometry.zig` | Circles, strips, caps and joins | Degenerate strokes | Join threshold, gentle bends without joins |
+| `storage.zig` | Read, queued atomic writes, completions, environment resolution, temporary directories | Unavailable directory, unwritable names | Coalesced writes, reads after queued writes, missing files, stable names |
+| `platform.zig` and `bridge.c` | Raw input, PDF render, worker thread rendering and wake-ups, text and icons, screenshots | Missing PDF, invalid page, oversized scale | Poll sentinel, density, window ids, document identity after reopen |
 | `check_style.zig` | Clean files and exact limit | Expected CLI rejection | Long lines, tabs, spaces, and CRLF endings |
 | `build.zig` and CI | Every declared test and build step executes | Invalid style fixture must fail | Debug tests plus `ReleaseSafe` compilation |
 
@@ -33,8 +35,10 @@ zig build check:release
 
 `zig build ci --summary all` is authoritative. It runs formatting and style
 checks, strict C compilation, all test layers, the end-to-end PDF smoke test,
-and the optimized safety-enabled build. The native tests leave one screenshot
-per interface surface in `.zig-cache/screenshots` for visual review.
+and the optimized safety-enabled build. The application tests run on the
+in-memory backend and link no native library. The native tests leave one
+screenshot per interface surface in `.zig-cache/screenshots` for visual
+review, including one at the minimum window size.
 
 ## Expectations for changes
 

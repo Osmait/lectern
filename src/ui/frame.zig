@@ -26,6 +26,11 @@ pub const FrameInfo = struct {
 pub const Frame = struct {
     dark_mode: bool,
     document_open: bool,
+    /// Device pixels per logical pixel of the frame being drawn.
+    density: f32 = 1,
+    /// Distinguishes documents, so cached geometry and thumbnails of a
+    /// previous document are never shown for the current one.
+    document_identity: u64 = 0,
     page_index: usize,
     page_count: usize,
     zoom_percent: u32,
@@ -37,8 +42,17 @@ pub const Frame = struct {
     color: annotations.Color,
     pen_size: annotations.PenSize,
     save_status: SaveStatus,
-    mouse: ?layout.Vec2,
+    /// Resolved once by the application, so drawing and repaint decisions
+    /// agree on what the pointer is over.
+    hover: layout.Hover = .none,
     page_rect: ?layout.Rect,
+    /// Finished strokes of the shown page and the notebook revision they
+    /// belong to; the renderer rebuilds their geometry only when it moves.
+    strokes: []const annotations.Stroke = &.{},
+    strokes_revision: u64 = 0,
+    /// Points of the stroke being drawn on the shown page, drawn with the
+    /// frame's color and pen size.
+    active_stroke: []const annotations.Point = &.{},
 
     pub fn annotationsEnabled(self: Frame) bool {
         return self.tool != .off;

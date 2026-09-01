@@ -24,6 +24,10 @@ pub const Kind = enum(u8) {
     file,
     dialog_closed,
     window,
+    /// The pointer left the window; no control is hovered anymore.
+    mouse_leave,
+    /// A background rasterization finished; the application collects it.
+    render_ready,
 };
 
 pub const Key = enum(u8) {
@@ -128,6 +132,9 @@ pub fn translate(raw: RawInput, state: State) ?Command {
         .mouse_down => translateMouseDown(raw, state),
         .mouse_motion => translateMotion(raw, state),
         .mouse_up => if (raw.button == .left and state.tool != .off) .draw_end else null,
+        // Both only wake the frame loop; the application reacts to them
+        // directly because they carry no user intent.
+        .mouse_leave, .render_ready => null,
     };
 }
 
@@ -452,6 +459,8 @@ test "files, dialogs, windows, and quit translate directly" {
     try std.testing.expectEqual(Command.redraw, translate(.{ .kind = .window }, state).?);
     try std.testing.expectEqual(Command.quit, translate(.{ .kind = .quit }, state).?);
     try std.testing.expectEqual(@as(?Command, null), translate(.{ .kind = .none }, state));
+    try std.testing.expectEqual(@as(?Command, null), translate(.{ .kind = .mouse_leave }, state));
+    try std.testing.expectEqual(@as(?Command, null), translate(.{ .kind = .render_ready }, state));
     try std.testing.expect((RawInput{ .kind = .mouse_motion }).hasPosition());
     try std.testing.expect(!(RawInput{ .kind = .key_down }).hasPosition());
 }

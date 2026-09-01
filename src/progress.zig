@@ -6,6 +6,7 @@
 //! value into its preferences once and then ignore it.
 
 const std = @import("std");
+const key_value = @import("key_value.zig");
 const Reader = @import("reader.zig").Reader;
 
 pub const Restored = struct {
@@ -17,38 +18,36 @@ pub const Restored = struct {
 /// never leave the reader in an invalid state.
 pub fn restore(reader: *Reader, data: []const u8) Restored {
     var result = Restored{};
-    var lines = std.mem.tokenizeAny(u8, data, "\r\n");
-    while (lines.next()) |line| {
-        var words = std.mem.tokenizeAny(u8, line, " \t");
-        const key = words.next() orelse continue;
-        const value_text = words.next() orelse continue;
-        const value = std.fmt.parseInt(i64, value_text, 10) catch continue;
-        if (std.mem.eql(u8, key, "page")) {
-            if (value >= 0) _ = reader.goToPage(@intCast(value));
-        } else if (std.mem.eql(u8, key, "bookmark")) {
-            if (value >= 0) _ = reader.setBookmark(@intCast(value));
-        } else if (std.mem.eql(u8, key, "dark")) {
-            result.legacy_dark_mode = value != 0;
+    var records = key_value.records(data);
+    while (records.next()) |record| {
+        if (std.mem.eql(u8, record.key, "page")) {
+            if (record.value >= 0) _ = reader.goToPage(@intCast(record.value));
+        } else if (std.mem.eql(u8, record.key, "bookmark")) {
+            if (record.value >= 0) _ = reader.setBookmark(@intCast(record.value));
+        } else if (std.mem.eql(u8, record.key, "dark")) {
+            result.legacy_dark_mode = record.value != 0;
         }
     }
     return result;
 }
 
-pub fn serialize(allocator: std.mem.Allocator, reader: Reader) ![]u8 {
+pub fn serialize(allocator: std.mem.Allocator, reader: Reader) error{OutOfMemory}![]u8 {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     var line_buffer: [64]u8 = undefined;
 
-    const page_line = try std.fmt.bufPrint(&line_buffer, "page {d}\n", .{reader.page_index});
+    const page_line = std.fmt.bufPrint(&line_buffer, "page {d}\n", .{reader.page_index}) catch {
+        unreachable;
+    };
     try output.appendSlice(allocator, page_line);
 
     var bookmarks = reader.bookmarks.iterator(.{});
     while (bookmarks.next()) |page_index| {
-        const bookmark_line = try std.fmt.bufPrint(
+        const bookmark_line = std.fmt.bufPrint(
             &line_buffer,
             "bookmark {d}\n",
             .{page_index},
-        );
+        ) catch unreachable;
         try output.appendSlice(allocator, bookmark_line);
     }
     return output.toOwnedSlice(allocator);

@@ -1,7 +1,8 @@
 //! Native contract tests. These run with SDL's dummy video backend in CI and
 //! exercise only what genuinely crosses the operating-system boundary: raw
-//! input, PDF rasterization, text and icon rasterization, and the frame
-//! pipeline. Screenshots of every surface are written for manual review.
+//! input, PDF rasterization on the worker thread, text and icon
+//! rasterization, and the frame pipeline. Screenshots of every surface are
+//! written for manual review.
 
 const std = @import("std");
 const book_read = @import("book_read");
@@ -85,6 +86,13 @@ test "native input crosses the bridge as typed raw events" {
     try std.testing.expectEqual(@as(f32, -1), scroll.wheel);
     try std.testing.expectEqual(@as(f32, 40), scroll.position.x);
 
+    var left = std.mem.zeroes(c.SDL_Event);
+    left.type = c.SDL_EVENT_WINDOW_MOUSE_LEAVE;
+    left.window.windowID = context.windowId();
+    try std.testing.expect(c.SDL_PushEvent(&left));
+    const gone = nextInput(context) orelse return error.ExpectedInput;
+    try std.testing.expectEqual(ui.input.Kind.mouse_leave, gone.kind);
+
     var dropped = std.mem.zeroes(c.SDL_Event);
     dropped.type = c.SDL_EVENT_USER;
     dropped.user.data1 = c.strdup("chosen-book.pdf");
@@ -135,6 +143,15 @@ test "native documents open, measure, render at any scale, and reject bad pages"
     try std.testing.expect(context.lastError().len > 0);
     try std.testing.expectError(error.PageRenderFailed, document.render(context, 0, 100.0, false));
 
+    // Reopening yields a new identity even though the file is the same.
+    var again = try platform.Document.open(
+        context,
+        std.testing.allocator,
+        "tests/fixtures/research-methods.pdf",
+    );
+    defer again.deinit();
+    try std.testing.expect(again.identity() != document.identity());
+
     try std.testing.expectError(error.InvalidPdf, platform.Document.open(
         context,
         std.testing.allocator,
@@ -146,6 +163,78 @@ test "native documents open, measure, render at any scale, and reject bad pages"
         std.testing.allocator,
         "tests/fixtures/style-invalid.txt",
     ));
+}
+
+test "the native render queue rasterizes on a worker and wakes the main thread" {
+    var context = try platform.Context.init();
+    defer context.deinit();
+    drainInput(context);
+    var document = try platform.Document.open(
+        context,
+        std.testing.allocator,
+        "tests/fixtures/research-methods-eight.pdf",
+    );
+    defer document.deinit();
+    var queue = platform.RenderQueue.init(std.testing.allocator, std.testing.io);
+    defer queue.deinit();
+
+    const job = platform.RenderQueue.Job{
+        .document = document,
+        .generation = 1,
+        .page_index = 0,
+        .scale = 0.5,
+        .dark_mode = false,
+        .purpose = .page,
+        .priority = .immediate,
+    };
+    const first = try queue.submit(job);
+    var invalid = job;
+    invalid.page_index = 99;
+    invalid.priority = .prefetch;
+    const second = try queue.submit(invalid);
+    queue.waitIdle();
+    try std.testing.expect(queue.isIdle());
+    try std.testing.expectEqual(@as(usize, 0), queue.synchronous_render_count);
+
+    // The worker ended the wait with a render notification.
+    var woke = false;
+    var attempts: usize = 0;
+    while (attempts < 8 and !woke) : (attempts += 1) {
+        const raw = context.waitInput(std.testing.allocator, 100) orelse continue;
+        if (raw.path) |path| std.testing.allocator.free(path);
+        woke = raw.kind == .render_ready;
+    }
+    try std.testing.expect(woke);
+
+    var delivered: usize = 0;
+    var failed: usize = 0;
+    while (queue.poll(context, 1)) |result| {
+        delivered += 1;
+        if (result.texture) |texture| {
+            try std.testing.expectEqual(first, result.job.id);
+            var owned = texture;
+            defer owned.deinit();
+            const size = document.pageSize(0).?;
+            try std.testing.expectApproxEqAbs(
+                size.width / 2,
+                @as(f32, @floatFromInt(owned.width)),
+                1.0,
+            );
+        } else {
+            try std.testing.expectEqual(second, result.job.id);
+            failed += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), delivered);
+    try std.testing.expectEqual(@as(usize, 1), failed);
+
+    // A result of another generation is released without a texture, and a
+    // finished job can no longer be cancelled.
+    _ = try queue.submit(job);
+    queue.waitIdle();
+    try std.testing.expect(!queue.cancel(first));
+    try std.testing.expectEqual(@as(?platform.RenderQueue.Result, null), queue.poll(context, 2));
+    drainInput(context);
 }
 
 test "native text and icons rasterize with logical metrics" {
@@ -205,6 +294,14 @@ const screenshots = [_]Screenshot{
         .page_index = 0,
     },
     .{
+        .name = "minimum",
+        .window = .{ .width = 900, .height = 600 },
+        .dark_mode = false,
+        .tool = .pen,
+        .navigation_visible = true,
+        .page_index = 0,
+    },
+    .{
         .name = "navigation",
         .window = .{ .width = 1100, .height = 820 },
         .dark_mode = false,
@@ -240,6 +337,8 @@ test "the desktop renderer paints every surface through the native bridge" {
     );
     defer document.deinit();
     try std.testing.expectEqual(@as(usize, 8), document.pageCount());
+    var queue = platform.RenderQueue.init(std.testing.allocator, std.testing.io);
+    defer queue.deinit();
 
     var notebook = annotations.Notebook.init(std.testing.allocator);
     defer notebook.deinit();
@@ -280,6 +379,8 @@ test "the desktop renderer paints every surface through the native bridge" {
         const frame = ui.Frame{
             .dark_mode = shot.dark_mode,
             .document_open = true,
+            .density = info.density,
+            .document_identity = document.identity(),
             .page_index = shot.page_index,
             .page_count = 8,
             .zoom_percent = 100,
@@ -291,15 +392,42 @@ test "the desktop renderer paints every surface through the native bridge" {
             .color = .blue,
             .pen_size = .medium,
             .save_status = .saved,
-            .mouse = .{ .x = layout.toolbar.next.centerX(), .y = layout.toolbar.next.centerY() },
+            .hover = layout.hoverAt(.{
+                .x = layout.toolbar.next.centerX(),
+                .y = layout.toolbar.next.centerY(),
+            }, true, 0, 8),
             .page_rect = page_rect,
+            .strokes = notebook.strokesOn(shot.page_index),
+            .strokes_revision = notebook.revision,
         };
-        var report = renderer.draw(context, frame, layout, page, &notebook, document, info.density);
-        var extra_frames: usize = 0;
-        while (report.pending_thumbnails and extra_frames < 8) : (extra_frames += 1) {
-            report = renderer.draw(context, frame, layout, page, &notebook, document, info.density);
+        if (shot.navigation_visible) {
+            try renderer.thumbnails.prepare(
+                &queue,
+                document.identity(),
+                8,
+                shot.dark_mode,
+                info.density,
+            );
         }
-        try std.testing.expect(!report.pending_thumbnails);
+        var report = renderer.draw(context, frame, layout, page);
+        if (shot.navigation_visible) {
+            const has_thumbnails = renderer.thumbnails.liveCount() > 0;
+            try std.testing.expect(report.missing_thumbnails or has_thumbnails);
+            renderer.thumbnails.requestVisible(
+                &queue,
+                document,
+                1,
+                report.visible_thumbnails,
+                shot.dark_mode,
+                info.density,
+            );
+            queue.waitIdle();
+            while (queue.poll(context, 1)) |result| {
+                renderer.thumbnails.complete(result.job.id, result.job.page_index, result.texture);
+            }
+            report = renderer.draw(context, frame, layout, page);
+            try std.testing.expect(!report.missing_thumbnails);
+        }
 
         var path_buffer: [128]u8 = undefined;
         const path = try std.fmt.bufPrintZ(&path_buffer, "{s}/{s}.bmp", .{
@@ -310,4 +438,5 @@ test "the desktop renderer paints every surface through the native bridge" {
         context.endFrame();
     }
     try std.testing.expect(renderer.thumbnails.liveCount() > 0);
+    drainInput(context);
 }

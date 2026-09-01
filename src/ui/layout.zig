@@ -6,6 +6,8 @@
 const std = @import("std");
 const annotations = @import("book_read").annotations;
 
+/// Window points share the native bridge's memory layout, so vertex lists are
+/// handed over without copying. The platform adapter checks the match.
 pub const Vec2 = extern struct {
     x: f32,
     y: f32,
@@ -41,6 +43,10 @@ pub const Rect = extern struct {
         return self.y + self.h / 2;
     }
 
+    pub fn bottom(self: Rect) f32 {
+        return self.y + self.h;
+    }
+
     pub fn inset(self: Rect, amount: f32) Rect {
         return .{
             .x = self.x + amount,
@@ -51,22 +57,58 @@ pub const Rect = extern struct {
     }
 };
 
+/// The window the native bridge opens; the in-memory backend uses the same
+/// size so tests see the production geometry.
+pub const default_window = Size{ .width = 1100, .height = 820 };
+/// The smallest window the native bridge allows. Every control must fit at
+/// this size; the layout tests check it.
+pub const minimum_window = Size{ .width = 900, .height = 600 };
+/// Longest page side ever rasterized, in device pixels. This is the display
+/// policy; the native bridge enforces a larger hard limit on top of it.
+pub const maximum_page_pixels: f32 = 3072;
+
 pub const header_height: f32 = 64;
 pub const toolbar_top: f32 = 10;
 pub const toolbar_button: f32 = 44;
 pub const toolbar_gap: f32 = 8;
 pub const toolbar_right_margin: f32 = 12;
+pub const wordmark_x: f32 = 28;
+pub const wordmark_y: f32 = 20;
+pub const pages_button_x: f32 = 124;
+pub const open_button_x: f32 = 176;
+pub const open_button_wide_width: f32 = 220;
+pub const open_button_narrow_width: f32 = 92;
+/// Windows narrower than this show the document title in a short button.
+pub const open_button_wide_threshold: f32 = 1000;
+pub const zoom_reset_width: f32 = 64;
+/// The previous and next buttons straddle the page label around the toolbar
+/// center; these are their distances from that center.
+pub const navigation_previous_offset: f32 = 108;
+pub const navigation_next_offset: f32 = 72;
+/// The navigation cluster sits slightly left of the middle, leaving room for
+/// the zoom and bookmark actions on the right.
+pub const toolbar_center_ratio: f32 = 0.49;
 pub const page_margin_x: f32 = 24;
 pub const page_margin_y: f32 = 16;
 pub const panel_minimum_width: f32 = 300;
 pub const panel_maximum_width: f32 = 352;
+pub const panel_width_ratio: f32 = 0.229;
+pub const panel_padding_left: f32 = 24;
+pub const panel_padding_right: f32 = 16;
+pub const panel_padding_bottom: f32 = 16;
+pub const panel_tab_gap: f32 = 8;
+pub const panel_size_gap: f32 = 8;
+pub const panel_label_height: f32 = 20;
+pub const panel_status_height: f32 = 24;
 pub const navigation_minimum_width: f32 = 124;
 pub const navigation_maximum_width: f32 = 148;
+pub const navigation_width_ratio: f32 = 0.105;
 pub const thumbnail_slot_height: f32 = 164;
 pub const thumbnail_list_top: f32 = header_height + 48;
 pub const thumbnail_bottom_margin: f32 = 12;
 pub const thumbnail_scroll_step: f32 = 56;
 pub const thumbnail_image_height: f32 = 124;
+pub const thumbnail_label_offset: f32 = 136;
 
 pub const Options = struct {
     document_open: bool,
@@ -101,6 +143,56 @@ pub const PanelControl = union(enum) {
 
 pub const PageEdge = enum { previous, next };
 
+/// What the pointer is over. The application resolves it once per pointer
+/// move and hands it to the renderer, so both sides highlight the same thing.
+pub const Hover = union(enum) {
+    none,
+    toolbar: ToolbarButton,
+    panel: PanelControl,
+    thumbnail: usize,
+
+    pub fn isToolbar(self: Hover, button: ToolbarButton) bool {
+        return switch (self) {
+            .toolbar => |hovered| hovered == button,
+            else => false,
+        };
+    }
+
+    pub fn isPanel(self: Hover, tag: std.meta.Tag(PanelControl)) bool {
+        return switch (self) {
+            .panel => |control| std.meta.activeTag(control) == tag,
+            else => false,
+        };
+    }
+
+    pub fn isColor(self: Hover, color: annotations.Color) bool {
+        return switch (self) {
+            .panel => |control| switch (control) {
+                .color => |hovered| hovered == color,
+                else => false,
+            },
+            else => false,
+        };
+    }
+
+    pub fn isSize(self: Hover, size: annotations.PenSize) bool {
+        return switch (self) {
+            .panel => |control| switch (control) {
+                .size => |hovered| hovered == size,
+                else => false,
+            },
+            else => false,
+        };
+    }
+
+    pub fn isThumbnail(self: Hover, page_index: usize) bool {
+        return switch (self) {
+            .thumbnail => |hovered| hovered == page_index,
+            else => false,
+        };
+    }
+};
+
 pub const Toolbar = struct {
     pages: Rect,
     open: Rect,
@@ -132,13 +224,19 @@ pub const Toolbar = struct {
     }
 };
 
+/// The annotation margin is a vertical flow of rows. Every row has a fixed
+/// height; only the gaps between rows stretch or shrink with the window.
 pub const Panel = struct {
     bounds: Rect,
+    content_left: f32,
+    inner_width: f32,
+    /// Top of the title row; the close button shares it.
     title_y: f32,
     ink_label_y: f32,
     width_label_y: f32,
     edit_divider_y: f32,
     completion_divider_y: f32,
+    /// Top of the save status row.
     save_status_y: f32,
     close: Rect,
     pen: Rect,
@@ -150,9 +248,68 @@ pub const Panel = struct {
     done: Rect,
 };
 
+const PanelRow = enum {
+    title,
+    tabs,
+    ink_label,
+    swatches,
+    width_label,
+    sizes,
+    edit_divider,
+    undo,
+    clear,
+    completion_divider,
+    done,
+    status,
+};
+
+const panel_row_count = std.meta.fields(PanelRow).len;
+
+const panel_row_heights = std.enums.EnumArray(PanelRow, f32).init(.{
+    .title = 44,
+    .tabs = 60,
+    .ink_label = panel_label_height,
+    .swatches = 44,
+    .width_label = panel_label_height,
+    .sizes = 58,
+    .edit_divider = 1,
+    .undo = 44,
+    .clear = 44,
+    .completion_divider = 1,
+    .done = 48,
+    .status = panel_status_height,
+});
+
+/// Preferred gap above each row; the first one is the top padding. All gaps
+/// scale by one factor, so the margin fills tall windows evenly and still
+/// holds every control at the minimum window height.
+const panel_row_gaps = std.enums.EnumArray(PanelRow, f32).init(.{
+    .title = 24,
+    .tabs = 16,
+    .ink_label = 24,
+    .swatches = 8,
+    .width_label = 24,
+    .sizes = 8,
+    .edit_divider = 24,
+    .undo = 12,
+    .clear = 8,
+    .completion_divider = 12,
+    .done = 12,
+    .status = 24,
+});
+
+/// At the minimum gap factor the panel needs less than the minimum window
+/// height, which the layout tests verify.
+const panel_minimum_gap_factor: f32 = 0.5;
+const panel_maximum_gap_factor: f32 = 1.75;
+
 pub const VisibleThumbnails = struct {
     first: usize,
     end: usize,
+
+    pub fn contains(self: VisibleThumbnails, page_index: usize) bool {
+        return page_index >= self.first and page_index < self.end;
+    }
 };
 
 pub const Layout = struct {
@@ -166,7 +323,7 @@ pub const Layout = struct {
     pub fn compute(window: Size, options: Options) Layout {
         const navigation_width: f32 = if (options.navigation_visible)
             std.math.clamp(
-                window.width * 0.105,
+                window.width * navigation_width_ratio,
                 navigation_minimum_width,
                 navigation_maximum_width,
             )
@@ -230,6 +387,24 @@ pub const Layout = struct {
         if (panel.clear.contains(point)) return .clear;
         if (panel.done.contains(point)) return .done;
         return null;
+    }
+
+    /// Resolves what the pointer is over; null means the pointer is outside
+    /// the window.
+    pub fn hoverAt(
+        self: Layout,
+        point: ?Vec2,
+        document_open: bool,
+        thumbnail_scroll: f32,
+        page_count: usize,
+    ) Hover {
+        const position = point orelse return .none;
+        if (self.toolbarHit(position, document_open)) |button| return .{ .toolbar = button };
+        if (self.panelHit(position)) |control| return .{ .panel = control };
+        if (self.thumbnailAt(position, thumbnail_scroll, page_count)) |index| {
+            return .{ .thumbnail = index };
+        }
+        return .none;
     }
 
     pub fn pageEdge(self: Layout, point: Vec2) ?PageEdge {
@@ -309,9 +484,8 @@ pub const Layout = struct {
     pub fn visibleThumbnails(self: Layout, scroll: f32, page_count: usize) VisibleThumbnails {
         if (page_count == 0) return .{ .first = 0, .end = 0 };
         const first: usize = @intFromFloat(@max(scroll, 0) / thumbnail_slot_height);
-        const span: usize = @intFromFloat(
-            (self.window.height - thumbnail_list_top) / thumbnail_slot_height,
-        );
+        const list_height = @max(self.window.height - thumbnail_list_top, 0);
+        const span: usize = @intFromFloat(list_height / thumbnail_slot_height);
         return .{
             .first = @min(first, page_count),
             .end = @min(first + span + 2, page_count),
@@ -340,7 +514,11 @@ pub const Layout = struct {
 };
 
 fn panelWidthFor(window_width: f32) f32 {
-    return std.math.clamp(window_width * 0.229, panel_minimum_width, panel_maximum_width);
+    return std.math.clamp(
+        window_width * panel_width_ratio,
+        panel_minimum_width,
+        panel_maximum_width,
+    );
 }
 
 fn takeRight(right: *f32, width: f32) Rect {
@@ -350,13 +528,20 @@ fn takeRight(right: *f32, width: f32) Rect {
     return rect;
 }
 
+fn toolbarSquare(x: f32) Rect {
+    return .{ .x = x, .y = toolbar_top, .w = toolbar_button, .h = toolbar_button };
+}
+
 fn computeToolbar(window_width: f32) Toolbar {
     var toolbar: Toolbar = undefined;
-    toolbar.pages = .{ .x = 124, .y = toolbar_top, .w = toolbar_button, .h = toolbar_button };
+    toolbar.pages = toolbarSquare(pages_button_x);
     toolbar.open = .{
-        .x = 176,
+        .x = open_button_x,
         .y = toolbar_top,
-        .w = if (window_width > 1000) 220 else 92,
+        .w = if (window_width > open_button_wide_threshold)
+            open_button_wide_width
+        else
+            open_button_narrow_width,
         .h = toolbar_button,
     };
 
@@ -366,26 +551,17 @@ fn computeToolbar(window_width: f32) Toolbar {
     toolbar.bookmark = takeRight(&right, toolbar_button);
     toolbar.jump = takeRight(&right, toolbar_button);
     toolbar.zoom_in = takeRight(&right, toolbar_button);
-    toolbar.zoom_reset = takeRight(&right, 64);
+    toolbar.zoom_reset = takeRight(&right, zoom_reset_width);
     toolbar.zoom_out = takeRight(&right, toolbar_button);
 
-    // The next button ends 116 logical pixels right of the center, so keeping
-    // the center this far from the first action leaves one gap between them.
-    const preferred_center = window_width * 0.49;
-    const maximum_center = toolbar.zoom_out.x - (72 + toolbar_button + toolbar_gap);
+    // The next button must end one gap before the first action on the right,
+    // which bounds how far right the navigation center may move.
+    const preferred_center = window_width * toolbar_center_ratio;
+    const maximum_center = toolbar.zoom_out.x -
+        (navigation_next_offset + toolbar_button + toolbar_gap);
     const center = @min(preferred_center, maximum_center);
-    toolbar.previous = .{
-        .x = center - 108,
-        .y = toolbar_top,
-        .w = toolbar_button,
-        .h = toolbar_button,
-    };
-    toolbar.next = .{
-        .x = center + 72,
-        .y = toolbar_top,
-        .w = toolbar_button,
-        .h = toolbar_button,
-    };
+    toolbar.previous = toolbarSquare(center - navigation_previous_offset);
+    toolbar.next = toolbarSquare(center + navigation_next_offset);
     toolbar.page_label = .{
         .x = toolbar.previous.x + toolbar.previous.w,
         .y = toolbar_top,
@@ -395,82 +571,119 @@ fn computeToolbar(window_width: f32) Toolbar {
     return toolbar;
 }
 
+fn panelRowTops(available: f32) std.enums.EnumArray(PanelRow, f32) {
+    var content_height: f32 = 0;
+    var gap_total: f32 = 0;
+    for (panel_row_heights.values) |height| content_height += height;
+    for (panel_row_gaps.values) |gap| gap_total += gap;
+    const slack = available - panel_padding_bottom - content_height;
+    const factor = std.math.clamp(
+        slack / gap_total,
+        panel_minimum_gap_factor,
+        panel_maximum_gap_factor,
+    );
+
+    var tops = std.enums.EnumArray(PanelRow, f32).initUndefined();
+    var y = header_height;
+    for (std.enums.values(PanelRow)) |row| {
+        y += panel_row_gaps.get(row) * factor;
+        tops.set(row, y);
+        y += panel_row_heights.get(row);
+    }
+    return tops;
+}
+
 fn computePanel(window: Size) Panel {
     const width = panelWidthFor(window.width);
     const left = window.width - width;
     const available = window.height - header_height;
-    const content_left = left + 24;
-    const inner_width = width - 40;
-    const tool_width = (inner_width - 8) / 2;
-    const tool_top = header_height + available * 0.10;
-    const title_y = header_height + available * 0.05;
+    const content_left = left + panel_padding_left;
+    const inner_width = width - panel_padding_left - panel_padding_right;
+    const tops = panelRowTops(available);
+    const tool_width = (inner_width - panel_tab_gap) / 2;
 
     var panel = Panel{
         .bounds = .{ .x = left, .y = header_height, .w = width, .h = available },
-        .title_y = title_y,
-        .ink_label_y = header_height + available * 0.20,
-        .width_label_y = header_height + available * 0.344,
-        .edit_divider_y = header_height + available * 0.484,
-        .completion_divider_y = header_height + available * 0.653,
-        .save_status_y = header_height + available * 0.77,
-        .close = .{ .x = left + width - 52, .y = title_y - 16, .w = 44, .h = 44 },
-        .pen = .{ .x = content_left, .y = tool_top, .w = tool_width, .h = 60 },
-        .eraser = .{
-            .x = content_left + tool_width + 8,
-            .y = tool_top,
+        .content_left = content_left,
+        .inner_width = inner_width,
+        .title_y = tops.get(.title),
+        .ink_label_y = tops.get(.ink_label),
+        .width_label_y = tops.get(.width_label),
+        .edit_divider_y = tops.get(.edit_divider),
+        .completion_divider_y = tops.get(.completion_divider),
+        .save_status_y = tops.get(.status),
+        .close = .{
+            .x = left + width - panel_padding_right - toolbar_button,
+            .y = tops.get(.title),
+            .w = toolbar_button,
+            .h = panel_row_heights.get(.title),
+        },
+        .pen = .{
+            .x = content_left,
+            .y = tops.get(.tabs),
             .w = tool_width,
-            .h = 60,
+            .h = panel_row_heights.get(.tabs),
+        },
+        .eraser = .{
+            .x = content_left + tool_width + panel_tab_gap,
+            .y = tops.get(.tabs),
+            .w = tool_width,
+            .h = panel_row_heights.get(.tabs),
         },
         .colors = undefined,
         .sizes = undefined,
         .undo = .{
             .x = content_left,
-            .y = header_height + available * 0.504,
+            .y = tops.get(.undo),
             .w = inner_width,
-            .h = 44,
+            .h = panel_row_heights.get(.undo),
         },
         .clear = .{
             .x = content_left,
-            .y = header_height + available * 0.563,
+            .y = tops.get(.clear),
             .w = inner_width,
-            .h = 44,
+            .h = panel_row_heights.get(.clear),
         },
         .done = .{
             .x = content_left,
-            .y = header_height + available * 0.685,
+            .y = tops.get(.done),
             .w = inner_width,
-            .h = 48,
+            .h = panel_row_heights.get(.done),
         },
     };
 
-    const swatch_y = header_height + available * 0.27;
     const swatch_step = inner_width / @as(f32, @floatFromInt(panel.colors.len));
     for (&panel.colors, 0..) |*rect, index| {
-        const center_x = content_left - 8 + swatch_step * (@as(f32, @floatFromInt(index)) + 0.5);
-        rect.* = .{ .x = center_x - 20, .y = swatch_y - 22, .w = 40, .h = 44 };
+        const center_x = content_left + swatch_step * (@as(f32, @floatFromInt(index)) + 0.5);
+        rect.* = .{
+            .x = center_x - 20,
+            .y = tops.get(.swatches),
+            .w = 40,
+            .h = panel_row_heights.get(.swatches),
+        };
     }
 
-    const size_top = header_height + available * 0.38;
-    const size_width = (inner_width - 16) / @as(f32, @floatFromInt(panel.sizes.len));
+    const size_count: f32 = @floatFromInt(panel.sizes.len);
+    const size_width = (inner_width - panel_size_gap * (size_count - 1)) / size_count;
     for (&panel.sizes, 0..) |*rect, index| {
         rect.* = .{
-            .x = content_left + @as(f32, @floatFromInt(index)) * (size_width + 8),
-            .y = size_top,
+            .x = content_left + @as(f32, @floatFromInt(index)) * (size_width + panel_size_gap),
+            .y = tops.get(.sizes),
             .w = size_width,
-            .h = 58,
+            .h = panel_row_heights.get(.sizes),
         };
     }
     return panel;
 }
 
-const test_window = Size{ .width = 1100, .height = 820 };
+const test_window = default_window;
 
 fn testLayout(options: Options) Layout {
     return Layout.compute(test_window, options);
 }
 
 test "toolbar buttons never overlap and stay inside the header" {
-    for ([_]f32{ 900, 1100, 1300, 1536, 2400 }) |width| {
+    for ([_]f32{ minimum_window.width, 1100, 1300, 1536, 2400 }) |width| {
         const layout = Layout.compute(.{ .width = width, .height = 820 }, .{
             .document_open = true,
             .navigation_visible = true,
@@ -560,6 +773,102 @@ test "the annotation panel occupies the right edge and hit tests every control" 
     });
     try std.testing.expectEqual(@as(?Panel, null), closed.panel);
     try std.testing.expectEqual(@as(?PanelControl, null), closed.panelHit(center.of(panel.pen)));
+}
+
+/// Every panel row from top to bottom, as the vertical span it occupies.
+fn panelRows(panel: Panel) [panel_row_count][2]f32 {
+    return .{
+        .{ panel.close.y, panel.close.bottom() },
+        .{ panel.pen.y, panel.pen.bottom() },
+        .{ panel.ink_label_y, panel.ink_label_y + panel_label_height },
+        .{ panel.colors[0].y, panel.colors[0].bottom() },
+        .{ panel.width_label_y, panel.width_label_y + panel_label_height },
+        .{ panel.sizes[0].y, panel.sizes[0].bottom() },
+        .{ panel.edit_divider_y, panel.edit_divider_y + 1 },
+        .{ panel.undo.y, panel.undo.bottom() },
+        .{ panel.clear.y, panel.clear.bottom() },
+        .{ panel.completion_divider_y, panel.completion_divider_y + 1 },
+        .{ panel.done.y, panel.done.bottom() },
+        .{ panel.save_status_y, panel.save_status_y + panel_status_height },
+    };
+}
+
+test "panel rows never overlap and fit from the minimum window height upward" {
+    for ([_]f32{ minimum_window.height, 640, 700, 820, 1000, 1400, 2200 }) |height| {
+        const layout = Layout.compute(.{ .width = minimum_window.width, .height = height }, .{
+            .document_open = true,
+            .navigation_visible = true,
+            .annotations_enabled = true,
+        });
+        const panel = layout.panel.?;
+        const rows = panelRows(panel);
+        var previous_bottom: f32 = header_height;
+        for (rows) |row| {
+            try std.testing.expect(row[0] >= previous_bottom);
+            try std.testing.expect(row[1] > row[0]);
+            previous_bottom = row[1];
+        }
+        try std.testing.expect(previous_bottom + panel_padding_bottom <= height + 0.01);
+
+        // Controls stay inside the panel horizontally, including the close
+        // button on the right edge.
+        try std.testing.expect(panel.close.x + panel.close.w <= panel.bounds.x + panel.bounds.w);
+        try std.testing.expect(panel.eraser.x + panel.eraser.w <=
+            panel.bounds.x + panel.bounds.w - panel_padding_right + 0.01);
+        try std.testing.expect(panel.sizes[2].x + panel.sizes[2].w <=
+            panel.content_left + panel.inner_width + 0.01);
+        try std.testing.expect(panel.colors[0].x >= panel.content_left - 0.01);
+    }
+}
+
+test "panel gaps stretch in tall windows and shrink in short ones" {
+    const short = Layout.compute(.{ .width = 900, .height = minimum_window.height }, .{
+        .document_open = true,
+        .navigation_visible = true,
+        .annotations_enabled = true,
+    }).panel.?;
+    const tall = Layout.compute(.{ .width = 900, .height = 1400 }, .{
+        .document_open = true,
+        .navigation_visible = true,
+        .annotations_enabled = true,
+    }).panel.?;
+    try std.testing.expect(tall.undo.y - tall.sizes[0].bottom() >
+        short.undo.y - short.sizes[0].bottom());
+    try std.testing.expect(tall.done.bottom() < 1400 * 0.85);
+}
+
+test "hover resolves the toolbar, the panel, the rail, or nothing" {
+    const layout = testLayout(.{
+        .document_open = true,
+        .navigation_visible = true,
+        .annotations_enabled = true,
+    });
+    const panel = layout.panel.?;
+    try std.testing.expectEqual(Hover.none, layout.hoverAt(null, true, 0, 10));
+    const toolbar = layout.hoverAt(.{ .x = layout.toolbar.next.centerX(), .y = 30 }, true, 0, 10);
+    try std.testing.expect(toolbar.isToolbar(.next));
+    try std.testing.expect(!toolbar.isToolbar(.previous));
+    const swatch = layout.hoverAt(.{
+        .x = panel.colors[2].centerX(),
+        .y = panel.colors[2].centerY(),
+    }, true, 0, 10);
+    try std.testing.expect(swatch.isColor(.green));
+    try std.testing.expect(!swatch.isColor(.blue));
+    try std.testing.expect(!swatch.isPanel(.undo));
+    const size = layout.hoverAt(.{
+        .x = panel.sizes[1].centerX(),
+        .y = panel.sizes[1].centerY(),
+    }, true, 0, 10);
+    try std.testing.expect(size.isSize(.medium));
+    const undo = layout.hoverAt(.{
+        .x = panel.undo.centerX(),
+        .y = panel.undo.centerY(),
+    }, true, 0, 10);
+    try std.testing.expect(undo.isPanel(.undo));
+    const rail = layout.hoverAt(.{ .x = 60, .y = 280 }, true, 0, 10);
+    try std.testing.expect(rail.isThumbnail(1));
+    try std.testing.expect(!rail.isThumbnail(0));
+    try std.testing.expectEqual(Hover.none, layout.hoverAt(.{ .x = 600, .y = 400 }, true, 0, 10));
 }
 
 test "page edges split the reading area into quarters" {
@@ -666,7 +975,15 @@ test "thumbnail rail scrolls independently and maps visible pages" {
     const visible = layout.visibleThumbnails(0, 10);
     try std.testing.expectEqual(@as(usize, 0), visible.first);
     try std.testing.expect(visible.end >= 5 and visible.end <= 10);
+    try std.testing.expect(visible.contains(0));
+    try std.testing.expect(!visible.contains(visible.end));
     const tail = layout.visibleThumbnails(layout.thumbnailMaxScroll(10), 10);
     try std.testing.expectEqual(@as(usize, 10), tail.end);
     try std.testing.expectEqual(@as(usize, 0), layout.visibleThumbnails(0, 0).end);
+    const tiny = Layout.compute(.{ .width = 900, .height = 50 }, .{
+        .document_open = true,
+        .navigation_visible = true,
+        .annotations_enabled = false,
+    });
+    try std.testing.expectEqual(@as(usize, 2), tiny.visibleThumbnails(0, 10).end);
 }

@@ -48,14 +48,21 @@ pub fn build(b: *std.Build) void {
     const test_unit_step = b.step("test:unit", "Run platform-independent unit tests");
     test_unit_step.dependOn(&run_unit_tests.step);
 
+    // The application tests run on the in-memory backend and therefore link
+    // no native library; they only need the core module.
     const application_tests = b.addTest(.{
-        .root_module = executable.root_module,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/application_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "book_read", .module = core_module }},
+        }),
         .filters = test_filters,
     });
     const run_application_tests = b.addRunArtifact(application_tests);
     const test_application_step = b.step(
         "test:application",
-        "Run application, interface, and storage tests",
+        "Run application, interface, and storage tests on the in-memory backend",
     );
     test_application_step.dependOn(&run_application_tests.step);
 
@@ -151,7 +158,6 @@ pub fn build(b: *std.Build) void {
     const smoke_test = b.addRunArtifact(executable);
     smoke_test.addArgs(&.{ "--smoke-test", "tests/fixtures/smoke.pdf" });
     smoke_test.setEnvironmentVariable("SDL_VIDEODRIVER", "dummy");
-    smoke_test.setEnvironmentVariable("XDG_STATE_HOME", b.pathFromRoot(".zig-cache/smoke-state"));
     const integration_step = b.step("test:integration", "Render a PDF through the native stack");
     integration_step.dependOn(&smoke_test.step);
 

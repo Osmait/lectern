@@ -11,8 +11,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define BR_MAXIMUM_PAGE_PIXELS 8192
 #define BR_FONT_FAMILY "Noto Sans"
+
+/* Codes of the SDL user events the bridge posts to itself. */
+enum {
+    BR_USER_EVENT_DIALOG = 0,
+    BR_USER_EVENT_WAKE = 1
+};
 
 struct BR_Context {
     SDL_Window *window;
@@ -29,7 +34,25 @@ struct BR_Context {
 struct BR_Document {
     PopplerDocument *document;
     char *path;
+    uint64_t serial;
 };
+
+struct BR_Image {
+    cairo_surface_t *surface;
+    int width;
+    int height;
+};
+
+/* Dark mode inverts the page with a lookup table instead of arithmetic per
+ * channel: white paper becomes a dark surface and ink stays readable. The
+ * table is filled once in br_init, before any worker thread can read it. */
+static uint8_t dark_table[256];
+
+static void init_dark_table(void) {
+    for (int value = 0; value < 256; ++value) {
+        dark_table[value] = (uint8_t)(235 - (value * 220) / 255);
+    }
+}
 
 struct BR_Texture {
     SDL_Texture *texture;
@@ -76,9 +99,10 @@ BR_Context *br_init(char **error_message) {
         return NULL;
     }
 
+    init_dark_table();
     BR_Context *context = calloc(1, sizeof(*context));
     if (!context || !SDL_CreateWindowAndRenderer(
-            "Book Read", 1100, 820,
+            "Book Read", BR_DEFAULT_WINDOW_WIDTH, BR_DEFAULT_WINDOW_HEIGHT,
             SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY,
             &context->window, &context->renderer)) {
         if (error_message) {
@@ -89,7 +113,8 @@ BR_Context *br_init(char **error_message) {
         return NULL;
     }
     context->pixel_density = 1.0f;
-    SDL_SetWindowMinimumSize(context->window, 900, 600);
+    SDL_SetWindowMinimumSize(context->window,
+                             BR_MINIMUM_WINDOW_WIDTH, BR_MINIMUM_WINDOW_HEIGHT);
     /* Presenting waits for the display instead of spinning the CPU. */
     SDL_SetRenderVSync(context->renderer, 1);
 
@@ -125,8 +150,18 @@ static void SDLCALL dialog_callback(void *userdata,
     SDL_Event event;
     SDL_zero(event);
     event.type = SDL_EVENT_USER;
+    event.user.code = BR_USER_EVENT_DIALOG;
     event.user.data1 = (files && files[0]) ? strdup(files[0]) : NULL;
     if (!SDL_PushEvent(&event)) free(event.user.data1);
+}
+
+void br_wake(void) {
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = SDL_EVENT_USER;
+    event.user.code = BR_USER_EVENT_WAKE;
+    /* Pushing events is one of the few SDL calls allowed from any thread. */
+    SDL_PushEvent(&event);
 }
 
 void br_open_dialog(BR_Context *context) {
@@ -213,8 +248,15 @@ static void translate_event(const SDL_Event *event, BR_Input *input) {
             }
             break;
         case SDL_EVENT_USER:
+            if (event->user.code == BR_USER_EVENT_WAKE) {
+                input->kind = BR_INPUT_RENDER_READY;
+                break;
+            }
             input->kind = event->user.data1 ? BR_INPUT_FILE : BR_INPUT_DIALOG_CLOSED;
             input->path = event->user.data1;
+            break;
+        case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+            input->kind = BR_INPUT_MOUSE_LEAVE;
             break;
         case SDL_EVENT_WINDOW_RESIZED:
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
@@ -224,7 +266,6 @@ static void translate_event(const SDL_Event *event, BR_Input *input) {
         case SDL_EVENT_WINDOW_RESTORED:
         case SDL_EVENT_WINDOW_MAXIMIZED:
         case SDL_EVENT_WINDOW_MOUSE_ENTER:
-        case SDL_EVENT_WINDOW_MOUSE_LEAVE:
             input->kind = BR_INPUT_WINDOW;
             break;
         default:
@@ -376,23 +417,28 @@ void br_draw_texture(BR_Context *context,
 
 void br_draw_triangles(BR_Context *context,
                        const BR_Point *points,
+                       const BR_Color *colors,
                        size_t point_count,
                        const int *indices,
-                       size_t index_count,
-                       BR_Color color) {
+                       size_t index_count) {
     if (point_count == 0 || index_count == 0 || point_count > INT_MAX ||
         index_count > INT_MAX) return;
     if (context->vertex_capacity < point_count) {
+        /* Grow geometrically so a sequence of ever larger meshes does not
+         * reallocate on every call. */
+        size_t capacity = context->vertex_capacity ? context->vertex_capacity : 256;
+        while (capacity < point_count) capacity *= 2;
         SDL_Vertex *grown = realloc(context->vertex_scratch,
-                                    point_count * sizeof(*grown));
+                                    capacity * sizeof(*grown));
         if (!grown) return;
         context->vertex_scratch = grown;
-        context->vertex_capacity = point_count;
+        context->vertex_capacity = capacity;
     }
-    const SDL_FColor fcolor = {
-        color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f
-    };
     for (size_t index = 0; index < point_count; ++index) {
+        const BR_Color color = colors[index];
+        const SDL_FColor fcolor = {
+            color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f
+        };
         context->vertex_scratch[index].position.x = points[index].x;
         context->vertex_scratch[index].position.y = points[index].y;
         context->vertex_scratch[index].color = fcolor;
@@ -747,9 +793,17 @@ BR_Document *br_pdf_open(BR_Context *context, const char *path) {
         free(absolute);
         return NULL;
     }
+    /* Addresses get reused after a close; a serial never does, so caches
+     * keyed by identity can never mistake a new document for an old one. */
+    static uint64_t next_serial = 0;
     document->document = poppler;
     document->path = absolute;
+    document->serial = ++next_serial;
     return document;
+}
+
+uint64_t br_pdf_identity(const BR_Document *document) {
+    return document ? document->serial : 0;
 }
 
 void br_pdf_close(BR_Document *document) {
@@ -795,38 +849,32 @@ int br_pdf_page_size(const BR_Document *document,
     return 1;
 }
 
-/* Dark mode inverts the page with a lookup table instead of arithmetic per
- * channel: white paper becomes a dark surface and ink stays readable. */
-static const uint8_t *dark_lookup(void) {
-    static uint8_t table[256];
-    static int ready = 0;
-    if (!ready) {
-        for (int value = 0; value < 256; ++value) {
-            table[value] = (uint8_t)(235 - (value * 220) / 255);
-        }
-        ready = 1;
-    }
-    return table;
-}
-
 static void darken_surface(unsigned char *pixels, int width, int height, int stride) {
-    const uint8_t *table = dark_lookup();
     for (int y = 0; y < height; ++y) {
         unsigned char *row = pixels + (size_t)y * stride;
         for (int x = 0; x < width; ++x) {
-            row[x * 4 + 0] = table[row[x * 4 + 0]];
-            row[x * 4 + 1] = table[row[x * 4 + 1]];
-            row[x * 4 + 2] = table[row[x * 4 + 2]];
+            row[x * 4 + 0] = dark_table[row[x * 4 + 0]];
+            row[x * 4 + 1] = dark_table[row[x * 4 + 1]];
+            row[x * 4 + 2] = dark_table[row[x * 4 + 2]];
         }
     }
 }
 
-BR_Texture *br_pdf_render(BR_Context *context,
-                          const BR_Document *document,
-                          int page_index,
-                          float scale,
-                          int dark_mode) {
-    PopplerPage *page = load_page(context, document, page_index);
+/* Loads a page without reporting errors to a context, so it can run on a
+ * worker thread. */
+static PopplerPage *load_page_quietly(const BR_Document *document, int page_index) {
+    if (!document || page_index < 0 ||
+        page_index >= poppler_document_get_n_pages(document->document)) {
+        return NULL;
+    }
+    return poppler_document_get_page(document->document, page_index);
+}
+
+BR_Image *br_pdf_render_image(const BR_Document *document,
+                              int page_index,
+                              float scale,
+                              int dark_mode) {
+    PopplerPage *page = load_page_quietly(document, page_index);
     if (!page) return NULL;
 
     double width_points = 0, height_points = 0;
@@ -835,7 +883,6 @@ BR_Texture *br_pdf_render(BR_Context *context,
     const int height = (int)(height_points * scale + 0.999);
     if (scale <= 0 || width <= 0 || height <= 0 ||
         width > BR_MAXIMUM_PAGE_PIXELS || height > BR_MAXIMUM_PAGE_PIXELS) {
-        set_error(context, "Page render size is out of range.");
         g_object_unref(page);
         return NULL;
     }
@@ -844,7 +891,6 @@ BR_Texture *br_pdf_render(BR_Context *context,
     cairo_t *cr = cairo_create(surface);
     if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS ||
         cairo_status(cr) != CAIRO_STATUS_SUCCESS) {
-        set_error(context, "Could not allocate the page image.");
         cairo_destroy(cr);
         cairo_surface_destroy(surface);
         g_object_unref(page);
@@ -855,17 +901,62 @@ BR_Texture *br_pdf_render(BR_Context *context,
     cairo_paint(cr);
     cairo_scale(cr, scale, scale);
     poppler_page_render(page, cr);
+    cairo_destroy(cr);
+    g_object_unref(page);
     cairo_surface_flush(surface);
+    if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
+        cairo_surface_destroy(surface);
+        return NULL;
+    }
     if (dark_mode) {
         darken_surface(cairo_image_surface_get_data(surface), width, height,
                        cairo_image_surface_get_stride(surface));
         cairo_surface_mark_dirty(surface);
     }
 
-    BR_Texture *texture = texture_from_surface(context, surface, width, height);
-    cairo_destroy(cr);
-    cairo_surface_destroy(surface);
-    g_object_unref(page);
+    BR_Image *image = malloc(sizeof(*image));
+    if (!image) {
+        cairo_surface_destroy(surface);
+        return NULL;
+    }
+    image->surface = surface;
+    image->width = width;
+    image->height = height;
+    return image;
+}
+
+void br_image_destroy(BR_Image *image) {
+    if (!image) return;
+    cairo_surface_destroy(image->surface);
+    free(image);
+}
+
+BR_Texture *br_texture_from_image(BR_Context *context, const BR_Image *image) {
+    if (!image) {
+        set_error(context, "No page image to upload.");
+        return NULL;
+    }
+    BR_Texture *texture = texture_from_surface(context, image->surface,
+                                               image->width, image->height);
     if (texture) SDL_SetTextureScaleMode(texture->texture, SDL_SCALEMODE_LINEAR);
+    return texture;
+}
+
+BR_Texture *br_pdf_render(BR_Context *context,
+                          const BR_Document *document,
+                          int page_index,
+                          float scale,
+                          int dark_mode) {
+    PopplerPage *page = load_page(context, document, page_index);
+    if (!page) return NULL;
+    g_object_unref(page);
+
+    BR_Image *image = br_pdf_render_image(document, page_index, scale, dark_mode);
+    if (!image) {
+        set_error(context, "Page render size is out of range.");
+        return NULL;
+    }
+    BR_Texture *texture = br_texture_from_image(context, image);
+    br_image_destroy(image);
     return texture;
 }

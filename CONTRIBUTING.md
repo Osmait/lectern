@@ -33,10 +33,12 @@ The CI contract includes:
   over every source file under `src`, `tests`, and `tools`
 - C compilation with `-Wall -Wextra -Wpedantic -Werror`
 - Pure-Zig unit tests for the core
-- Application, interface, and storage tests with an in-memory backend
+- Application, interface, and storage tests with an in-memory backend; they
+  link no native library
 - Native bridge and platform contract tests with SDL's dummy video backend,
   which also write one screenshot per surface to `.zig-cache/screenshots`
-- A headless end-to-end PDF rendering and annotation test
+- A headless end-to-end PDF rendering and annotation test in a temporary
+  state directory
 - A `ReleaseSafe` build
 
 Useful targeted commands:
@@ -58,7 +60,8 @@ zig build check:release
 1. Put reading rules and state transitions in the pure Zig core.
 2. Put layout, hit testing, theming, and drawing decisions in `src/ui`.
 3. Keep SDL, Poppler, Cairo, and C types behind `src/platform.zig`, and keep
-   the native bridge limited to primitives.
+   the native bridge limited to primitives. Anything that runs on the render
+   worker must not touch the window context.
 4. Add tests for valid inputs, invalid inputs, and boundary transitions.
 5. Explain why a non-obvious decision exists; do not narrate obvious code.
 6. Keep unrelated changes out of the same pull request.

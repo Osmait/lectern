@@ -10,11 +10,18 @@
  * drawing commands, texture creation, and PDF rasterization. Everything that
  * gives those primitives meaning (layout, hit testing, theming, caches, and
  * persistence) lives in Zig where it can be unit tested without a display.
+ *
+ * Threading: every function takes the main thread unless noted. Rendering a
+ * page to a BR_Image needs no context and may run on a worker thread; the
+ * image becomes a texture on the main thread. A document must be used by one
+ * thread at a time.
  */
 
 typedef struct BR_Context BR_Context;
 typedef struct BR_Document BR_Document;
 typedef struct BR_Texture BR_Texture;
+/* A rasterized page that has not been uploaded to the window yet. */
+typedef struct BR_Image BR_Image;
 
 enum {
     BR_INPUT_NONE = 0,
@@ -26,7 +33,9 @@ enum {
     BR_INPUT_MOUSE_WHEEL,
     BR_INPUT_FILE,
     BR_INPUT_DIALOG_CLOSED,
-    BR_INPUT_WINDOW
+    BR_INPUT_WINDOW,
+    BR_INPUT_MOUSE_LEAVE,
+    BR_INPUT_RENDER_READY
 };
 
 /* Keys the reader reacts to. Navigation keys are matched by physical position
@@ -119,6 +128,14 @@ enum {
 
 #define BR_ICON_SIZE 40
 
+/* The Zig layout mirrors these; the platform adapter checks them. */
+#define BR_DEFAULT_WINDOW_WIDTH 1100
+#define BR_DEFAULT_WINDOW_HEIGHT 820
+#define BR_MINIMUM_WINDOW_WIDTH 900
+#define BR_MINIMUM_WINDOW_HEIGHT 600
+/* Hard limit on a rasterized page side; the Zig display policy stays below. */
+#define BR_MAXIMUM_PAGE_PIXELS 8192
+
 BR_Context *br_init(char **error_message);
 void br_shutdown(BR_Context *context);
 const char *br_last_error(const BR_Context *context);
@@ -126,7 +143,10 @@ void br_free(void *memory);
 uint64_t br_ticks_ms(void);
 
 int br_poll_input(BR_Context *context, BR_Input *input);
+/* A negative timeout waits until an event arrives. */
 int br_wait_input(BR_Context *context, int timeout_ms, BR_Input *input);
+/* Ends a wait from any thread with a BR_INPUT_RENDER_READY event. */
+void br_wake(void);
 
 void br_window_size(const BR_Context *context, float *width, float *height);
 uint32_t br_window_id(const BR_Context *context);
@@ -150,12 +170,13 @@ void br_draw_texture(BR_Context *context,
                      BR_Texture *texture,
                      BR_Rect destination,
                      BR_Color tint);
+/* One color per point. */
 void br_draw_triangles(BR_Context *context,
                        const BR_Point *points,
+                       const BR_Color *colors,
                        size_t point_count,
                        const int *indices,
-                       size_t index_count,
-                       BR_Color color);
+                       size_t index_count);
 
 BR_Texture *br_create_text(BR_Context *context,
                            const char *text,
@@ -165,17 +186,28 @@ BR_Texture *br_create_text(BR_Context *context,
                            float *logical_height);
 float br_measure_text(BR_Context *context, const char *text, int size, int strong);
 BR_Texture *br_create_icon(BR_Context *context, int icon, BR_Color color);
+BR_Texture *br_texture_from_image(BR_Context *context, const BR_Image *image);
 void br_texture_size(const BR_Texture *texture, int *width, int *height);
 void br_texture_destroy(BR_Texture *texture);
 
 BR_Document *br_pdf_open(BR_Context *context, const char *path);
 void br_pdf_close(BR_Document *document);
 const char *br_pdf_path(const BR_Document *document);
+/* Unique for every open, unlike the address of the handle. */
+uint64_t br_pdf_identity(const BR_Document *document);
 int br_pdf_page_count(const BR_Document *document);
 int br_pdf_page_size(const BR_Document *document,
                      int page_index,
                      float *width,
                      float *height);
+/* Rasterizes on the calling thread without touching any context; returns
+ * NULL when the page or the requested size is invalid. */
+BR_Image *br_pdf_render_image(const BR_Document *document,
+                              int page_index,
+                              float scale,
+                              int dark_mode);
+void br_image_destroy(BR_Image *image);
+/* Rasterizes and uploads in one step on the main thread. */
 BR_Texture *br_pdf_render(BR_Context *context,
                           const BR_Document *document,
                           int page_index,

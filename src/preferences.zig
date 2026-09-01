@@ -4,24 +4,21 @@
 //! survives opening another PDF, unlike per-document progress.
 
 const std = @import("std");
+const key_value = @import("key_value.zig");
 
 pub const Preferences = struct {
     dark_mode: bool = true,
 
     pub fn parse(data: []const u8) Preferences {
         var preferences = Preferences{};
-        var lines = std.mem.tokenizeAny(u8, data, "\r\n");
-        while (lines.next()) |line| {
-            var words = std.mem.tokenizeAny(u8, line, " \t");
-            const key = words.next() orelse continue;
-            const value_text = words.next() orelse continue;
-            const value = std.fmt.parseInt(i64, value_text, 10) catch continue;
-            if (std.mem.eql(u8, key, "dark")) preferences.dark_mode = value != 0;
+        var records = key_value.records(data);
+        while (records.next()) |record| {
+            if (std.mem.eql(u8, record.key, "dark")) preferences.dark_mode = record.value != 0;
         }
         return preferences;
     }
 
-    pub fn serialize(self: Preferences, allocator: std.mem.Allocator) ![]u8 {
+    pub fn serialize(self: Preferences, allocator: std.mem.Allocator) error{OutOfMemory}![]u8 {
         return std.fmt.allocPrint(allocator, "dark {d}\n", .{@intFromBool(self.dark_mode)});
     }
 };

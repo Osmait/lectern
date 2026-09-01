@@ -15,13 +15,18 @@ using their native APIs directly.
 - Add bookmarks and jump between them
 - Dark and light reading modes, remembered across documents and launches
 - High-DPI text, vector icons, and pages rasterized at the size they are shown
+- Pages rendered in the background: the neighbors of the current page are
+  prepared ahead of time, so most page turns are instant and the window never
+  freezes on a heavy page
 - Page navigation and zoom that re-renders crisply once you pause
 - A collapsible, scrollable thumbnail rail for previewing and jumping to pages
 - Freehand PDF notes with pen and eraser tools
 - Six ink colors, three pen sizes, per-page undo, and clear-page controls
-- Annotation autosave without modifying the original PDF
+- Annotation autosave without modifying the original PDF, written by a
+  background thread so drawing never waits for the disk
 - Mouse controls: clickable toolbar, page-edge clicks, and the scroll wheel
-- An idle window costs no CPU: the reader sleeps until input or a timer wakes it
+- An idle window costs no CPU: the reader sleeps until input, a timer, or a
+  finished render wakes it
 - Progress stored under `$XDG_STATE_HOME/book-read` or
   `~/.local/state/book-read`
 
@@ -100,7 +105,8 @@ you open another document.
 Annotations use normalized page coordinates, so they stay aligned while the
 window or page zoom changes. They are stored in a versioned sidecar file next
 to the reading-state record and written a moment after each edit. The source
-PDF is never changed.
+PDF is never changed. If a PDF is replaced by a revision with fewer pages, the
+notes on the missing pages are skipped and the rest are kept.
 
 ## Stored files
 
@@ -113,7 +119,8 @@ Everything lives in the state directory:
 | `<hash>.state.notes` | Annotations of one document |
 
 Files are written atomically, so an interrupted save never damages the previous
-version.
+version. The `--smoke-test` mode uses a temporary directory instead and
+deletes it afterwards, so it never touches these files.
 
 ## Development
 
@@ -123,7 +130,8 @@ Run every local quality gate with:
 zig build ci --summary all
 ```
 
-The native tests leave a screenshot of every interface surface in
+The application tests run on an in-memory backend and need no native library;
+the native tests leave a screenshot of every interface surface in
 `.zig-cache/screenshots` for visual review.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [STYLE.md](STYLE.md), and the
