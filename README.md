@@ -1,7 +1,24 @@
 # Book Read
 
+[![CI](https://github.com/Osmait/book-read/actions/workflows/ci.yml/badge.svg)](https://github.com/Osmait/book-read/actions/workflows/ci.yml)
+
 A native Linux PDF reader written in Zig. It renders real PDF pages with
 Poppler and Cairo and uses SDL3 for the desktop interface.
+
+![Book Read with the annotation margin open beside a page](docs/images/desktop.png)
+
+*Reading with the annotation margin open: pen and eraser tabs, ink swatches,
+stroke widths, undo, clear, and the save indicator. The page rail on the left
+previews every page.*
+
+<p>
+<img src="docs/images/navigation-dark.png" width="49%" alt="Dark mode with the page rail open on page six">
+<img src="docs/images/compact.png" width="49%" alt="The interface at a compact window size">
+</p>
+
+*Dark mode inverts the page and keeps ink readable; the layout holds every
+control down to the minimum window size. The screenshots are produced by the
+native test suite, so they always show the current interface.*
 
 The reading state, the interface, and the application logic live in Zig. A
 narrow C bridge exposes only rendering and input primitives, keeping the
