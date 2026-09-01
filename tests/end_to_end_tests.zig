@@ -205,6 +205,20 @@ test "a reading session: open, annotate, turn pages, persist, and reopen" {
     try std.testing.expect(application.renderer.thumbnails.liveCount() > 0);
     try std.testing.expect(application.pages.count() > 0);
 
+    // Dragging the rail scrollbar with the mouse scrolls the page list.
+    const bar = application.layout.thumbnailScrollbar(application.thumbnail_scroll, 8) orelse {
+        return error.ExpectedScrollbar;
+    };
+    const thumb_x = application.layout.navigation_width - 5;
+    try harness.pushMouse(.down, thumb_x, bar.thumb.y + 6);
+    try harness.pushMouse(.motion, thumb_x + 30, bar.thumb.y + 6 + 120);
+    try harness.pushMouse(.up, thumb_x + 30, bar.thumb.y + 6 + 120);
+    harness.pump();
+    try std.testing.expect(application.thumbnail_scroll > 0);
+    try std.testing.expectEqual(@as(?f32, null), application.scrollbar_grab);
+    try std.testing.expectEqual(@as(usize, 1), application.notebook.strokeCount());
+    harness.settle();
+
     try harness.pushKey(c.SDL_SCANCODE_UNKNOWN, c.SDLK_B);
     try harness.pushKey(c.SDL_SCANCODE_UNKNOWN, c.SDLK_D);
     harness.pump();
@@ -286,7 +300,8 @@ test "escape quits before any document is open and leaves no state behind" {
     try harness.pushKey(c.SDL_SCANCODE_ESCAPE, c.SDLK_UNKNOWN);
     try harness.application.run(.{});
     try std.testing.expect(!harness.application.running);
-    try std.testing.expect(harness.application.dialog_open);
+    // No file dialog was pushed at the user while the desk was empty.
+    try std.testing.expect(!harness.application.dialog_open);
     try std.testing.expectEqual(@as(?[]u8, null), try harness.storage.read(
         std.testing.allocator,
         app.storage.preferences_name,

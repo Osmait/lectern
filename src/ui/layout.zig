@@ -109,6 +109,15 @@ pub const thumbnail_bottom_margin: f32 = 12;
 pub const thumbnail_scroll_step: f32 = 56;
 pub const thumbnail_image_height: f32 = 124;
 pub const thumbnail_label_offset: f32 = 136;
+/// The rail scrollbar: a thin thumb at the right edge that widens while it
+/// is hovered or dragged, and a wider strip of the rail that catches the
+/// pointer so the thin thumb can actually be grabbed.
+pub const scrollbar_width: f32 = 2;
+pub const scrollbar_active_width: f32 = 6;
+pub const scrollbar_right_margin: f32 = 2;
+pub const scrollbar_hit_width: f32 = 14;
+pub const scrollbar_bottom_margin: f32 = 8;
+pub const scrollbar_minimum_thumb: f32 = 32;
 
 pub const Options = struct {
     document_open: bool,
@@ -143,6 +152,21 @@ pub const PanelControl = union(enum) {
 
 pub const PageEdge = enum { previous, next };
 
+/// The rail scrollbar as drawn: the track it moves along and the thumb that
+/// shows the visible part of the page list.
+pub const Scrollbar = struct {
+    track: Rect,
+    thumb: Rect,
+};
+
+pub const ScrollbarHit = union(enum) {
+    /// The pointer is on the thumb; the payload is its distance from the
+    /// thumb's top, which a drag keeps constant.
+    thumb: f32,
+    /// The pointer is on the track beside the thumb, at this height.
+    track: f32,
+};
+
 /// What the pointer is over. The application resolves it once per pointer
 /// move and hands it to the renderer, so both sides highlight the same thing.
 pub const Hover = union(enum) {
@@ -150,6 +174,11 @@ pub const Hover = union(enum) {
     toolbar: ToolbarButton,
     panel: PanelControl,
     thumbnail: usize,
+    scrollbar,
+
+    pub fn isScrollbar(self: Hover) bool {
+        return std.meta.activeTag(self) == .scrollbar;
+    }
 
     pub fn isToolbar(self: Hover, button: ToolbarButton) bool {
         return switch (self) {
@@ -401,10 +430,77 @@ pub const Layout = struct {
         const position = point orelse return .none;
         if (self.toolbarHit(position, document_open)) |button| return .{ .toolbar = button };
         if (self.panelHit(position)) |control| return .{ .panel = control };
+        if (self.scrollbarHit(position, thumbnail_scroll, page_count)) |hit| {
+            return switch (hit) {
+                .thumb => .scrollbar,
+                .track => .none,
+            };
+        }
         if (self.thumbnailAt(position, thumbnail_scroll, page_count)) |index| {
             return .{ .thumbnail = index };
         }
         return .none;
+    }
+
+    /// Where the rail scrollbar sits for a scroll position, or null when
+    /// every page fits and there is nothing to scroll.
+    pub fn thumbnailScrollbar(self: Layout, scroll: f32, page_count: usize) ?Scrollbar {
+        if (self.navigation_width <= 0) return null;
+        const maximum_scroll = self.thumbnailMaxScroll(page_count);
+        if (maximum_scroll <= 0) return null;
+        const track_top = thumbnail_list_top;
+        const track_height = self.window.height - track_top - scrollbar_bottom_margin;
+        if (track_height <= 0) return null;
+        const content_height = @as(f32, @floatFromInt(page_count)) * thumbnail_slot_height;
+        const proportional = track_height * self.thumbnailViewportHeight() / content_height;
+        const thumb_height = @min(track_height, @max(scrollbar_minimum_thumb, proportional));
+        const fraction = self.clampThumbnailScroll(scroll, page_count) / maximum_scroll;
+        const x = self.navigation_width - scrollbar_right_margin - scrollbar_width;
+        return .{
+            .track = .{ .x = x, .y = track_top, .w = scrollbar_width, .h = track_height },
+            .thumb = .{
+                .x = x,
+                .y = track_top + (track_height - thumb_height) * fraction,
+                .w = scrollbar_width,
+                .h = thumb_height,
+            },
+        };
+    }
+
+    /// Whether a point grabs the thumb or lands on the track. The strip that
+    /// catches the pointer is wider than the drawn thumb.
+    pub fn scrollbarHit(
+        self: Layout,
+        point: Vec2,
+        scroll: f32,
+        page_count: usize,
+    ) ?ScrollbarHit {
+        const bar = self.thumbnailScrollbar(scroll, page_count) orelse return null;
+        if (point.x < self.navigation_width - scrollbar_hit_width) return null;
+        if (point.x >= self.navigation_width) return null;
+        if (point.y < bar.track.y or point.y >= bar.track.bottom()) return null;
+        if (point.y >= bar.thumb.y and point.y < bar.thumb.bottom()) {
+            return .{ .thumb = point.y - bar.thumb.y };
+        }
+        return .{ .track = point.y };
+    }
+
+    /// The scroll that puts the top of the thumb at `thumb_y`, clamped to
+    /// the track.
+    pub fn scrollForThumb(self: Layout, thumb_y: f32, page_count: usize) f32 {
+        const bar = self.thumbnailScrollbar(0, page_count) orelse return 0;
+        const travel = bar.track.h - bar.thumb.h;
+        if (travel <= 0) return 0;
+        const fraction = std.math.clamp((thumb_y - bar.track.y) / travel, 0, 1);
+        const scroll = fraction * self.thumbnailMaxScroll(page_count);
+        return self.clampThumbnailScroll(scroll, page_count);
+    }
+
+    /// The scroll that centers the thumb on a height of the track, for a
+    /// click beside the thumb.
+    pub fn scrollCenteredOn(self: Layout, y: f32, page_count: usize) f32 {
+        const bar = self.thumbnailScrollbar(0, page_count) orelse return 0;
+        return self.scrollForThumb(y - bar.thumb.h / 2, page_count);
     }
 
     pub fn pageEdge(self: Layout, point: Vec2) ?PageEdge {
@@ -1032,4 +1128,84 @@ test "rectangles inset, grow, and report their bottom edge" {
     try std.testing.expect(rect.inset(20).isEmpty());
     try std.testing.expect(rect.contains(.{ .x = 10, .y = 20 }));
     try std.testing.expect(!rect.contains(.{ .x = 40, .y = 20 }));
+}
+
+test "the rail scrollbar maps scroll to the thumb and back" {
+    const layout = testLayout(.{
+        .document_open = true,
+        .navigation_visible = true,
+        .annotations_enabled = false,
+    });
+    const page_count = 40;
+    const maximum = layout.thumbnailMaxScroll(page_count);
+    try std.testing.expectEqual(@as(?Scrollbar, null), layout.thumbnailScrollbar(0, 2));
+
+    const at_top = layout.thumbnailScrollbar(0, page_count).?;
+    try std.testing.expectEqual(thumbnail_list_top, at_top.track.y);
+    try std.testing.expectEqual(at_top.track.y, at_top.thumb.y);
+    try std.testing.expectEqual(layout.navigation_width - 4, at_top.thumb.x);
+    try std.testing.expectEqual(scrollbar_width, at_top.thumb.w);
+    try std.testing.expect(at_top.thumb.h >= scrollbar_minimum_thumb);
+    try std.testing.expect(at_top.thumb.h < at_top.track.h);
+    const at_bottom = layout.thumbnailScrollbar(maximum, page_count).?;
+    try std.testing.expectApproxEqAbs(at_bottom.track.bottom(), at_bottom.thumb.bottom(), 0.01);
+    const halfway = layout.thumbnailScrollbar(maximum / 2, page_count).?;
+    try std.testing.expectApproxEqAbs(
+        (at_top.thumb.y + at_bottom.thumb.y) / 2,
+        halfway.thumb.y,
+        0.01,
+    );
+
+    // The inverse mapping returns the scroll a thumb position came from and
+    // clamps beyond the track.
+    for ([_]f32{ 0, 100, maximum / 3, maximum }) |scroll| {
+        const bar = layout.thumbnailScrollbar(scroll, page_count).?;
+        const back = layout.scrollForThumb(bar.thumb.y, page_count);
+        try std.testing.expectApproxEqAbs(scroll, back, 0.05);
+    }
+    try std.testing.expectEqual(@as(f32, 0), layout.scrollForThumb(-500, page_count));
+    try std.testing.expectEqual(maximum, layout.scrollForThumb(5000, page_count));
+    try std.testing.expectEqual(@as(f32, 0), layout.scrollForThumb(200, 2));
+    const centered = layout.scrollCenteredOn(at_top.track.centerY(), page_count);
+    const centered_bar = layout.thumbnailScrollbar(centered, page_count).?;
+    try std.testing.expectApproxEqAbs(at_top.track.centerY(), centered_bar.thumb.centerY(), 0.5);
+}
+
+test "the scrollbar catches the pointer on a strip wider than the thumb" {
+    const layout = testLayout(.{
+        .document_open = true,
+        .navigation_visible = true,
+        .annotations_enabled = false,
+    });
+    const page_count = 40;
+    const bar = layout.thumbnailScrollbar(0, page_count).?;
+    const on_thumb = Vec2{ .x = layout.navigation_width - 6, .y = bar.thumb.y + 10 };
+    const hit = layout.scrollbarHit(on_thumb, 0, page_count).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 10), hit.thumb, 0.01);
+    const below = Vec2{ .x = layout.navigation_width - 1, .y = bar.thumb.bottom() + 40 };
+    const on_track = layout.scrollbarHit(below, 0, page_count).?;
+    try std.testing.expectApproxEqAbs(below.y, on_track.track, 0.01);
+    const left_of_strip = Vec2{
+        .x = layout.navigation_width - scrollbar_hit_width - 1,
+        .y = bar.thumb.y + 10,
+    };
+    const beside = layout.scrollbarHit(left_of_strip, 0, page_count);
+    try std.testing.expectEqual(@as(?ScrollbarHit, null), beside);
+    const above_track = Vec2{ .x = layout.navigation_width - 6, .y = bar.track.y - 1 };
+    const above = layout.scrollbarHit(above_track, 0, page_count);
+    try std.testing.expectEqual(@as(?ScrollbarHit, null), above);
+    try std.testing.expectEqual(@as(?ScrollbarHit, null), layout.scrollbarHit(on_thumb, 0, 2));
+
+    // Hover reports the thumb, ignores the track, and still finds the
+    // thumbnails left of the strip.
+    try std.testing.expect(layout.hoverAt(on_thumb, true, 0, page_count).isScrollbar());
+    try std.testing.expectEqual(Hover.none, layout.hoverAt(below, true, 0, page_count));
+    const first_slot = layout.hoverAt(.{ .x = 60, .y = 140 }, true, 0, page_count);
+    try std.testing.expect(first_slot.isThumbnail(0));
+    const hidden = testLayout(.{
+        .document_open = true,
+        .navigation_visible = false,
+        .annotations_enabled = false,
+    });
+    try std.testing.expectEqual(@as(?Scrollbar, null), hidden.thumbnailScrollbar(0, page_count));
 }

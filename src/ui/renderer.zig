@@ -350,16 +350,38 @@ pub fn Renderer(comptime backend: type) type {
             self.drawMesh(context, cache.mesh);
         }
 
+        pub const empty_state_title = "OPEN A PDF TO START";
+        pub const empty_state_hint = "Press O, use Open, or drop a file on the window";
+
+        /// The desk before a document: the dialog never opens on its own,
+        /// so the desk says how to bring a book in.
         fn drawEmptyState(self: *Self, context: backend.Context, layout: Layout) void {
-            const message = "OPEN A PDF TO START";
-            const entry = self.text_cache.get(context, message, 14, true, self.density) orelse {
-                return;
-            };
-            context.drawTexture(entry.texture.?, .{
-                .x = layout.content.x + (layout.content.w - entry.width) / 2,
-                .y = layout.window.height / 2,
-                .w = entry.width,
-                .h = entry.height,
+            const title = self.text_cache.get(
+                context,
+                empty_state_title,
+                14,
+                true,
+                self.density,
+            ) orelse return;
+            const title_y = layout.window.height / 2;
+            context.drawTexture(title.texture.?, .{
+                .x = layout.content.x + (layout.content.w - title.width) / 2,
+                .y = title_y,
+                .w = title.width,
+                .h = title.height,
+            }, self.palette.muted);
+            const hint = self.text_cache.get(
+                context,
+                empty_state_hint,
+                14,
+                false,
+                self.density,
+            ) orelse return;
+            context.drawTexture(hint.texture.?, .{
+                .x = layout.content.x + (layout.content.w - hint.width) / 2,
+                .y = title_y + title.height + 8,
+                .w = hint.width,
+                .h = hint.height,
             }, self.palette.muted);
         }
 
@@ -470,26 +492,43 @@ pub fn Renderer(comptime backend: type) type {
             }
             context.setClip(null);
 
-            const maximum_scroll = layout.thumbnailMaxScroll(frame.page_count);
-            if (maximum_scroll > 0) {
-                const track_top = layout_module.thumbnail_list_top;
-                const track_height = height - track_top - 8;
-                const viewport_height = layout.thumbnailViewportHeight();
-                const content_height = @as(f32, @floatFromInt(frame.page_count)) *
-                    layout_module.thumbnail_slot_height;
-                const thumb_height = std.math.clamp(
-                    track_height * viewport_height / content_height,
-                    32,
-                    track_height,
-                );
-                const thumb_y = track_top + (track_height - thumb_height) *
-                    frame.thumbnail_scroll / maximum_scroll;
-                context.fillRect(
-                    .{ .x = navigation_width - 4, .y = thumb_y, .w = 2, .h = thumb_height },
-                    palette.muted,
-                );
+            if (layout.thumbnailScrollbar(frame.thumbnail_scroll, frame.page_count)) |bar| {
+                self.drawScrollbar(context, frame, layout, bar);
             }
             return report;
+        }
+
+        /// The thumb is a hairline until the pointer reaches it; then it
+        /// widens over a visible track, and turns accent while dragged.
+        fn drawScrollbar(
+            self: *Self,
+            context: backend.Context,
+            frame: Frame,
+            layout: Layout,
+            bar: layout_module.Scrollbar,
+        ) void {
+            const palette = self.palette;
+            const active = frame.scrollbar_dragging or frame.hover.isScrollbar();
+            const width = if (active)
+                layout_module.scrollbar_active_width
+            else
+                layout_module.scrollbar_width;
+            const x = layout.navigation_width - layout_module.scrollbar_right_margin - width;
+            if (active) {
+                context.fillRect(.{
+                    .x = x,
+                    .y = bar.track.y,
+                    .w = width,
+                    .h = bar.track.h,
+                }, palette.hover);
+            }
+            const color = if (frame.scrollbar_dragging)
+                palette.accent
+            else if (active)
+                palette.text
+            else
+                palette.muted;
+            context.fillRect(.{ .x = x, .y = bar.thumb.y, .w = width, .h = bar.thumb.h }, color);
         }
 
         fn drawPanel(
@@ -947,6 +986,7 @@ fn testFrame(options: struct {
     thumbnail_scroll: f32 = 0,
     title: []const u8 = "Research Methods.pdf",
     pen_size: annotations.PenSize = .medium,
+    scrollbar_dragging: bool = false,
 }) Frame {
     return .{
         .dark_mode = options.dark_mode,
@@ -964,6 +1004,7 @@ fn testFrame(options: struct {
         .pen_size = options.pen_size,
         .save_status = options.save_status,
         .hover = options.hover,
+        .scrollbar_dragging = options.scrollbar_dragging,
         .page_rect = options.page_rect,
         .strokes = options.strokes,
         .strokes_revision = options.strokes_revision,
@@ -1478,10 +1519,16 @@ test "a rendered page is drawn in its rectangle and the empty state is centered"
         .document_open = false,
         .navigation_visible = false,
     }), closed, null);
-    const message = state.textDraw("OPEN A PDF TO START") orelse return error.EmptyStateNotDrawn;
+    const message = state.textDraw(TestRenderer.empty_state_title) orelse {
+        return error.EmptyStateNotDrawn;
+    };
     try std.testing.expectApproxEqAbs(closed.content.centerX(), message.rect.centerX(), 0.5);
     try std.testing.expectApproxEqAbs(closed.window.height / 2, message.rect.y, 0.01);
     try std.testing.expectEqual(palette.muted, message.tint);
+    // The hint sits right under the title and says how to open a book.
+    const hint = state.textDraw(TestRenderer.empty_state_hint) orelse return error.HintNotDrawn;
+    try std.testing.expectApproxEqAbs(closed.content.centerX(), hint.rect.centerX(), 0.5);
+    try std.testing.expectApproxEqAbs(message.rect.bottom() + 8, hint.rect.y, 0.01);
     try std.testing.expectEqual(@as(?mock.DrawnTexture, null), state.pageDraw());
 }
 
@@ -1580,4 +1627,49 @@ test "swatch geometry is rebuilt only when the selection, hover, theme, or panel
     _ = context.beginFrame(theme_module.white);
     _ = renderer.draw(context, testFrame(.{ .tool = .pen, .dark_mode = true }), wider, null);
     try std.testing.expectEqual(@as(usize, 4), renderer.swatches.rebuild_count);
+}
+
+test "the scrollbar thumb widens when hovered and turns accent while dragged" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var renderer = TestRenderer.init(std.testing.allocator);
+    defer renderer.deinit();
+    const layout = Layout.compute(state.window, .{
+        .document_open = true,
+        .navigation_visible = true,
+        .annotations_enabled = false,
+    });
+    const palette = theme_module.Palette.forMode(false);
+    const page_count = 40;
+    const bar = layout.thumbnailScrollbar(0, page_count).?;
+
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{ .page_count = page_count }), layout, null);
+    try std.testing.expect(state.filled(bar.thumb, palette.muted));
+
+    const wide = Rect{
+        .x = layout.navigation_width - layout_module.scrollbar_right_margin -
+            layout_module.scrollbar_active_width,
+        .y = bar.thumb.y,
+        .w = layout_module.scrollbar_active_width,
+        .h = bar.thumb.h,
+    };
+    const track = Rect{ .x = wide.x, .y = bar.track.y, .w = wide.w, .h = bar.track.h };
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{
+        .page_count = page_count,
+        .hover = .scrollbar,
+    }), layout, null);
+    try std.testing.expect(state.filled(wide, palette.text));
+    try std.testing.expect(state.filled(track, palette.hover));
+    try std.testing.expect(!state.filled(bar.thumb, palette.muted));
+
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{
+        .page_count = page_count,
+        .scrollbar_dragging = true,
+    }), layout, null);
+    try std.testing.expect(state.filled(wide, palette.accent));
+    try std.testing.expect(state.filled(track, palette.hover));
 }

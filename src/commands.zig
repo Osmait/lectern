@@ -16,6 +16,15 @@ pub const Command = union(enum) {
     toggle_dark_mode,
     toggle_pages,
     scroll_thumbnails: f32,
+    /// Scroll the rail to an absolute position; a click on the scrollbar
+    /// track produces it.
+    scroll_thumbnails_to: f32,
+    /// The pointer took the scrollbar thumb; the payload is the pointer's
+    /// distance from the thumb's top.
+    scrollbar_grab: f32,
+    /// The pointer moved while holding the thumb; the payload is its height.
+    scrollbar_drag: f32,
+    scrollbar_release,
     open_dialog,
     dialog_closed,
     /// The path is borrowed from the raw input that produced the command.

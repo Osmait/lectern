@@ -62,6 +62,10 @@ You can also open a PDF directly:
 zig build run -- /path/to/book.pdf
 ```
 
+Started without a path, the reader shows an empty desk and waits: press `O`,
+click **Open**, or drop a PDF on the window. The file dialog never opens on
+its own.
+
 ## Keyboard shortcuts
 
 | Key | Action |
@@ -89,7 +93,9 @@ You can also use the Pages icon in the top bar to show or hide the left rail,
 click a page preview, click the **left or right quarter** of the reading area to
 change pages, click the other toolbar controls, or use the mouse wheel.
 Scrolling over the thumbnail rail browses the full page list without changing
-the open page; scrolling over the document changes the current page. Select
+the open page; scrolling over the document changes the current page. The
+rail's scrollbar can be dragged with the mouse, and a click on its track
+jumps there. Select
 **PEN**, then hold the left mouse button and drag over the page to write.
 Select **ERASE** and drag across a stroke to remove it.
 

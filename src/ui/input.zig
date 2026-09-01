@@ -92,6 +92,8 @@ pub const State = struct {
     page_count: usize,
     thumbnail_scroll: f32,
     stroke_active: bool,
+    /// The scrollbar thumb is held, so pointer moves scroll the rail.
+    scrollbar_dragging: bool = false,
 };
 
 pub fn keyCommand(key: Key) ?Command {
@@ -131,7 +133,7 @@ pub fn translate(raw: RawInput, state: State) ?Command {
         .mouse_wheel => translateWheel(raw, state),
         .mouse_down => translateMouseDown(raw, state),
         .mouse_motion => translateMotion(raw, state),
-        .mouse_up => if (raw.button == .left and state.tool != .off) .draw_end else null,
+        .mouse_up => translateMouseUp(raw, state),
         // Both only wake the frame loop; the application reacts to them
         // directly because they carry no user intent.
         .mouse_leave, .render_ready => null,
@@ -154,6 +156,14 @@ fn translateMouseDown(raw: RawInput, state: State) ?Command {
         return toolbarCommand(button);
     }
     if (point.y < layout_module.header_height) return null;
+    if (state.layout.scrollbarHit(point, state.thumbnail_scroll, state.page_count)) |hit| {
+        return switch (hit) {
+            .thumb => |offset| .{ .scrollbar_grab = offset },
+            .track => |y| .{
+                .scroll_thumbnails_to = state.layout.scrollCenteredOn(y, state.page_count),
+            },
+        };
+    }
     if (state.layout.thumbnailAt(point, state.thumbnail_scroll, state.page_count)) |page_index| {
         return .{ .select_page = page_index };
     }
@@ -175,7 +185,18 @@ fn translateMouseDown(raw: RawInput, state: State) ?Command {
     };
 }
 
+fn translateMouseUp(raw: RawInput, state: State) ?Command {
+    if (raw.button != .left) return null;
+    if (state.scrollbar_dragging) return .scrollbar_release;
+    return if (state.tool != .off) .draw_end else null;
+}
+
 fn translateMotion(raw: RawInput, state: State) ?Command {
+    // A held thumb follows the pointer; a release outside the window never
+    // arrives as a button event, so a move without the button lets go.
+    if (state.scrollbar_dragging) {
+        return if (raw.left_held) .{ .scrollbar_drag = raw.position.y } else .scrollbar_release;
+    }
     if (state.tool == .off) return null;
     if (raw.left_held) {
         const page_point = normalizedPagePoint(state.page_rect, raw.position) orelse return null;
@@ -230,6 +251,8 @@ fn testState(options: struct {
     tool: annotations.Tool = .off,
     stroke_active: bool = false,
     navigation_visible: bool = true,
+    page_count: usize = 10,
+    scrollbar_dragging: bool = false,
 }) State {
     const layout = Layout.compute(.{ .width = 1100, .height = 820 }, .{
         .document_open = true,
@@ -241,9 +264,10 @@ fn testState(options: struct {
         .page_rect = layout.pageRect(.{ .width = 612, .height = 792 }, 1.0),
         .tool = options.tool,
         .document_open = true,
-        .page_count = 10,
+        .page_count = options.page_count,
         .thumbnail_scroll = 0,
         .stroke_active = options.stroke_active,
+        .scrollbar_dragging = options.scrollbar_dragging,
     };
 }
 
@@ -463,4 +487,57 @@ test "files, dialogs, windows, and quit translate directly" {
     try std.testing.expectEqual(@as(?Command, null), translate(.{ .kind = .render_ready }, state));
     try std.testing.expect((RawInput{ .kind = .mouse_motion }).hasPosition());
     try std.testing.expect(!(RawInput{ .kind = .key_down }).hasPosition());
+}
+
+test "the rail scrollbar is grabbed, dragged, released, and clicked" {
+    const state = testState(.{ .tool = .pen, .page_count = 40 });
+    const bar = state.layout.thumbnailScrollbar(0, 40).?;
+    const thumb_x = state.layout.navigation_width - 6;
+    const grab = translate(.{
+        .kind = .mouse_down,
+        .button = .left,
+        .position = .{ .x = thumb_x, .y = bar.thumb.y + 12 },
+    }, state).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 12), grab.scrollbar_grab, 0.01);
+    const jump = translate(.{
+        .kind = .mouse_down,
+        .button = .left,
+        .position = .{ .x = thumb_x, .y = bar.track.bottom() - 5 },
+    }, state).?;
+    try std.testing.expect(jump.scroll_thumbnails_to > 0);
+
+    // While the thumb is held, moves scroll the rail even with the pen
+    // active, and letting go ends the drag instead of a stroke.
+    const dragging = testState(.{ .tool = .pen, .page_count = 40, .scrollbar_dragging = true });
+    const drag = translate(.{
+        .kind = .mouse_motion,
+        .left_held = true,
+        .position = .{ .x = 500, .y = 333 },
+    }, dragging).?;
+    try std.testing.expectEqual(@as(f32, 333), drag.scrollbar_drag);
+    try std.testing.expectEqual(Command.scrollbar_release, translate(.{
+        .kind = .mouse_motion,
+        .left_held = false,
+        .position = .{ .x = 500, .y = 333 },
+    }, dragging).?);
+    try std.testing.expectEqual(Command.scrollbar_release, translate(.{
+        .kind = .mouse_up,
+        .button = .left,
+        .position = .{ .x = 500, .y = 333 },
+    }, dragging).?);
+    try std.testing.expectEqual(@as(?Command, null), translate(.{
+        .kind = .mouse_up,
+        .button = .other,
+        .position = .{ .x = 500, .y = 333 },
+    }, dragging));
+
+    // With few pages there is no scrollbar and the click selects the page
+    // under the pointer instead.
+    const short = testState(.{ .page_count = 2 });
+    const selection = translate(.{
+        .kind = .mouse_down,
+        .button = .left,
+        .position = .{ .x = thumb_x, .y = bar.thumb.y + 12 },
+    }, short).?;
+    try std.testing.expectEqual(@as(usize, 0), selection.select_page);
 }

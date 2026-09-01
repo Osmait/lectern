@@ -168,6 +168,9 @@ pub fn ApplicationType(comptime backend: type) type {
         dialog_open: bool = false,
         navigation_visible: bool = true,
         thumbnail_scroll: f32 = 0,
+        /// While the rail scrollbar is dragged: the pointer's distance from
+        /// the thumb's top when it was grabbed.
+        scrollbar_grab: ?f32 = null,
         notes: PendingSave = .{},
         progress_save: PendingSave = .{},
         preferences_save: PendingSave = .{},
@@ -222,14 +225,15 @@ pub fn ApplicationType(comptime backend: type) type {
 
         pub fn run(self: *Self, options: RunOptions) !void {
             self.loadPreferences();
+            // The reader starts on an empty desk. The file dialog opens only
+            // when the user asks for it, with the Open button or the O key;
+            // a path that cannot be opened reports why and leaves the same
+            // choice to the user instead of pushing a dialog at them.
             if (options.initial_path) |path| {
                 self.openPdf(path) catch |err| {
                     if (options.smoke_test) return err;
                     self.reportOpenFailure(err);
-                    self.requestDialog();
                 };
-            } else if (!options.smoke_test) {
-                self.requestDialog();
             }
 
             if (options.smoke_test) {
@@ -337,18 +341,34 @@ pub fn ApplicationType(comptime backend: type) type {
                 .toggle_pages => {
                     if (self.document != null) {
                         self.navigation_visible = !self.navigation_visible;
+                        self.scrollbar_grab = null;
                         self.refreshLayout();
                         self.needs_redraw = true;
                     }
                 },
-                .scroll_thumbnails => |amount| {
-                    const scrolled = self.layout.scrollThumbnails(
-                        self.thumbnail_scroll,
-                        amount,
-                        self.reader.pageCount(),
-                    );
-                    if (scrolled != self.thumbnail_scroll) {
-                        self.thumbnail_scroll = scrolled;
+                .scroll_thumbnails => |amount| self.scrollRailTo(self.layout.scrollThumbnails(
+                    self.thumbnail_scroll,
+                    amount,
+                    self.reader.pageCount(),
+                )),
+                .scroll_thumbnails_to => |scroll| self.scrollRailTo(scroll),
+                .scrollbar_grab => |offset| {
+                    if (self.document != null and self.navigation_visible) {
+                        self.scrollbar_grab = offset;
+                        self.needs_redraw = true;
+                    }
+                },
+                .scrollbar_drag => |pointer_y| {
+                    if (self.scrollbar_grab) |offset| {
+                        self.scrollRailTo(self.layout.scrollForThumb(
+                            pointer_y - offset,
+                            self.reader.pageCount(),
+                        ));
+                    }
+                },
+                .scrollbar_release => {
+                    if (self.scrollbar_grab != null) {
+                        self.scrollbar_grab = null;
                         self.needs_redraw = true;
                     }
                 },
@@ -489,6 +509,7 @@ pub fn ApplicationType(comptime backend: type) type {
                 .pen_size = self.notebook.pen_size,
                 .save_status = self.save_status,
                 .hover = self.hover,
+                .scrollbar_dragging = self.scrollbar_grab != null,
                 .page_rect = self.pageRect(),
                 .strokes = self.notebook.strokesOn(page_index),
                 .strokes_revision = self.notebook.revision,
@@ -609,6 +630,7 @@ pub fn ApplicationType(comptime backend: type) type {
             self.save_status = .saved;
             self.render_timer = null;
             self.thumbnail_scroll = 0;
+            self.scrollbar_grab = null;
             self.refreshLayout();
             self.revealCurrentThumbnail();
             self.refreshHover();
@@ -1129,7 +1151,16 @@ pub fn ApplicationType(comptime backend: type) type {
                 .page_count = self.reader.pageCount(),
                 .thumbnail_scroll = self.thumbnail_scroll,
                 .stroke_active = self.notebook.hasActiveStroke(),
+                .scrollbar_dragging = self.scrollbar_grab != null,
             };
+        }
+
+        /// Scrolls the rail to a clamped position and repaints when it moved.
+        fn scrollRailTo(self: *Self, scroll: f32) void {
+            const clamped = self.layout.clampThumbnailScroll(scroll, self.reader.pageCount());
+            if (clamped == self.thumbnail_scroll) return;
+            self.thumbnail_scroll = clamped;
+            self.needs_redraw = true;
         }
 
         fn revealCurrentThumbnail(self: *Self) void {
@@ -1862,7 +1893,9 @@ test "interactive run loop waits for input, redraws on demand, and exits" {
     const application = &harness.application;
 
     try application.run(.{});
-    try std.testing.expectEqual(@as(usize, 1), state.open_dialog_count);
+    // Starting without a document never opens the file dialog by itself.
+    try std.testing.expectEqual(@as(usize, 0), state.open_dialog_count);
+    try std.testing.expect(!application.dialog_open);
     try std.testing.expectEqual(annotations.Tool.pen, application.notebook.tool);
     // The first frame, then one after the pen command; the hover and the quit
     // command do not repaint.
@@ -2008,4 +2041,101 @@ test "smoke run requires a document and validates annotation round trips" {
         error.AnnotationSaveFailed,
         failing_harness.application.run(.{ .initial_path = "smoke.pdf", .smoke_test = true }),
     );
+}
+
+test "the rail scrollbar can be dragged with the pointer" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    state.page_count = 40;
+    var harness: Harness = undefined;
+    harness.init(std.testing.allocator, &state);
+    defer harness.deinit();
+    const application = &harness.application;
+    try application.openPdf("long.pdf");
+    application.update(state.ticks);
+    const layout = application.layout;
+    const bar = layout.thumbnailScrollbar(0, 40).?;
+    const thumb_x = layout.navigation_width - 6;
+
+    // Hovering the thumb highlights it; pressing grabs it.
+    application.needs_redraw = false;
+    application.handleInput(.{
+        .kind = .mouse_motion,
+        .position = .{ .x = thumb_x, .y = bar.thumb.y + 8 },
+    });
+    try std.testing.expect(application.hover.isScrollbar());
+    try std.testing.expect(application.needs_redraw);
+    application.handleInput(.{
+        .kind = .mouse_down,
+        .button = .left,
+        .position = .{ .x = thumb_x, .y = bar.thumb.y + 8 },
+    });
+    try std.testing.expectApproxEqAbs(@as(f32, 8), application.scrollbar_grab.?, 0.01);
+    try std.testing.expectEqual(@as(f32, 0), application.thumbnail_scroll);
+
+    // Dragging keeps the grabbed point under the pointer, even far from the rail.
+    application.needs_redraw = false;
+    application.handleInput(.{
+        .kind = .mouse_motion,
+        .left_held = true,
+        .position = .{ .x = 600, .y = bar.thumb.y + 8 + 100 },
+    });
+    try std.testing.expect(application.needs_redraw);
+    const dragged = application.layout.thumbnailScrollbar(application.thumbnail_scroll, 40).?;
+    try std.testing.expectApproxEqAbs(bar.thumb.y + 100, dragged.thumb.y, 0.5);
+    try std.testing.expect(application.thumbnail_scroll > 0);
+    try std.testing.expect(!application.notebook.hasActiveStroke());
+
+    // Releasing ends the drag; a later move without the button does nothing.
+    application.handleInput(.{
+        .kind = .mouse_up,
+        .button = .left,
+        .position = .{ .x = 600, .y = 700 },
+    });
+    try std.testing.expectEqual(@as(?f32, null), application.scrollbar_grab);
+    const after_release = application.thumbnail_scroll;
+    application.handleInput(.{ .kind = .mouse_motion, .position = .{ .x = 600, .y = 750 } });
+    try std.testing.expectEqual(after_release, application.thumbnail_scroll);
+
+    // A click on the track jumps so the thumb centers there; the drag is
+    // clamped at the ends of the track.
+    application.handleInput(.{
+        .kind = .mouse_down,
+        .button = .left,
+        .position = .{ .x = thumb_x, .y = bar.track.bottom() - 2 },
+    });
+    try std.testing.expectEqual(layout.thumbnailMaxScroll(40), application.thumbnail_scroll);
+    application.handleCommand(.{ .scrollbar_grab = 0 });
+    application.handleCommand(.{ .scrollbar_drag = -1000 });
+    try std.testing.expectEqual(@as(f32, 0), application.thumbnail_scroll);
+    application.handleCommand(.scrollbar_release);
+
+    // Hiding the rail lets go of the thumb, and without a document nothing
+    // can be grabbed.
+    application.handleCommand(.{ .scrollbar_grab = 4 });
+    application.handleCommand(.toggle_pages);
+    try std.testing.expectEqual(@as(?f32, null), application.scrollbar_grab);
+    application.handleCommand(.{ .scrollbar_grab = 4 });
+    try std.testing.expectEqual(@as(?f32, null), application.scrollbar_grab);
+}
+
+test "a path that fails to open reports the failure and waits for the user" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    state.fail_open = true;
+    state.inputs_arrive_while_waiting = true;
+    try state.pushInput(.{ .kind = .key_down, .key = .o });
+    try state.pushInput(.{ .kind = .quit });
+    var harness: Harness = undefined;
+    harness.init(std.testing.allocator, &state);
+    defer harness.deinit();
+    const application = &harness.application;
+
+    try application.run(.{ .initial_path = "missing.pdf" });
+    try std.testing.expectEqual(@as(usize, 1), state.show_error_count);
+    try std.testing.expectEqual(@as(?mock.Backend.Document, null), application.document);
+    // The dialog opened once, when the user pressed O, not before.
+    try std.testing.expectEqual(@as(usize, 1), state.open_dialog_count);
+    try std.testing.expect(application.dialog_open);
+    try std.testing.expect(!application.running);
 }

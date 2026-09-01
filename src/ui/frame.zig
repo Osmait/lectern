@@ -45,6 +45,8 @@ pub const Frame = struct {
     /// Resolved once by the application, so drawing and repaint decisions
     /// agree on what the pointer is over.
     hover: layout.Hover = .none,
+    /// The rail scrollbar is being dragged, so it is drawn in its active look.
+    scrollbar_dragging: bool = false,
     page_rect: ?layout.Rect,
     /// Finished strokes of the shown page and the notebook revision they
     /// belong to; the renderer rebuilds their geometry only when it moves.
