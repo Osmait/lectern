@@ -64,3 +64,28 @@ test "save status labels are distinct" {
     try std.testing.expect(!std.mem.eql(u8, SaveStatus.saved.label(), SaveStatus.failed.label()));
     try std.testing.expect(!std.mem.eql(u8, SaveStatus.pending.label(), SaveStatus.failed.label()));
 }
+
+test "annotations are enabled for every tool except off" {
+    const std = @import("std");
+    var frame = Frame{
+        .dark_mode = false,
+        .document_open = true,
+        .page_index = 0,
+        .page_count = 1,
+        .zoom_percent = 100,
+        .bookmarked = false,
+        .title = "",
+        .navigation_visible = true,
+        .thumbnail_scroll = 0,
+        .tool = .off,
+        .color = .blue,
+        .pen_size = .medium,
+        .save_status = .saved,
+        .page_rect = null,
+    };
+    try std.testing.expect(!frame.annotationsEnabled());
+    frame.tool = .pen;
+    try std.testing.expect(frame.annotationsEnabled());
+    frame.tool = .eraser;
+    try std.testing.expect(frame.annotationsEnabled());
+}

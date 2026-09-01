@@ -21,6 +21,24 @@ pub fn rgb(red: u8, green: u8, blue: u8) Rgba {
     return .{ .red = red, .green = green, .blue = blue, .alpha = 255 };
 }
 
+/// A vertex color as the bridge consumes it: four floats in 0..1 with SDL's
+/// layout, so a mesh is handed over without any per-frame conversion.
+pub const FColor = extern struct {
+    red: f32,
+    green: f32,
+    blue: f32,
+    alpha: f32,
+};
+
+pub fn toFloat(color: Rgba) FColor {
+    return .{
+        .red = @as(f32, @floatFromInt(color.red)) / 255.0,
+        .green = @as(f32, @floatFromInt(color.green)) / 255.0,
+        .blue = @as(f32, @floatFromInt(color.blue)) / 255.0,
+        .alpha = @as(f32, @floatFromInt(color.alpha)) / 255.0,
+    };
+}
+
 pub const Palette = struct {
     background: Rgba,
     header: Rgba,
@@ -135,4 +153,21 @@ test "ink colors and pen widths stay stable" {
     try std.testing.expectEqual(@as(f32, 2), penWidth(.thin));
     try std.testing.expectEqual(@as(f32, 4), penWidth(.medium));
     try std.testing.expectEqual(@as(f32, 8), penWidth(.thick));
+}
+
+test "float colors map every channel onto 0..1" {
+    const color = toFloat(.{ .red = 255, .green = 0, .blue = 51, .alpha = 128 });
+    try std.testing.expectEqual(@as(f32, 1), color.red);
+    try std.testing.expectEqual(@as(f32, 0), color.green);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2), color.blue, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.502), color.alpha, 0.001);
+}
+
+test "rgb builds opaque colors" {
+    const color = rgb(1, 2, 3);
+    try std.testing.expectEqual(@as(u8, 1), color.red);
+    try std.testing.expectEqual(@as(u8, 2), color.green);
+    try std.testing.expectEqual(@as(u8, 3), color.blue);
+    try std.testing.expectEqual(@as(u8, 255), color.alpha);
+    try std.testing.expectEqual(rgb(255, 255, 255), white);
 }

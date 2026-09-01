@@ -7,17 +7,142 @@
 const std = @import("std");
 const book_read = @import("book_read");
 const app = @import("app");
+const build_options = @import("build_options");
 const platform = app.platform;
 const ui = app.ui;
 const annotations = book_read.annotations;
 
 const c = @cImport({
     @cInclude("SDL3/SDL.h");
+    @cInclude("cairo/cairo.h");
     @cInclude("stdlib.h");
     @cInclude("string.h");
 });
 
 const screenshot_directory = ".zig-cache/screenshots";
+const golden_directory = "tests/golden";
+/// Screenshots are compared at a quarter of their size, so font hinting
+/// differences average away while layout and color regressions remain.
+const golden_scale: usize = 4;
+/// Largest allowed difference of one channel of one reduced pixel.
+const golden_pixel_tolerance: u32 = 32;
+/// Largest allowed mean difference over the whole image.
+const golden_mean_tolerance: f64 = 1.5;
+
+/// Compares a saved screenshot with its reference image, or rewrites the
+/// reference when the build was configured with `-Dupdate-golden`.
+fn checkGolden(name: [:0]const u8, screenshot_path: [:0]const u8) !void {
+    const loaded = c.SDL_LoadBMP(screenshot_path.ptr) orelse return error.ScreenshotUnreadable;
+    defer c.SDL_DestroySurface(loaded);
+    const surface = c.SDL_ConvertSurface(loaded, c.SDL_PIXELFORMAT_ARGB8888) orelse {
+        return error.ScreenshotUnreadable;
+    };
+    defer c.SDL_DestroySurface(surface);
+    const width: usize = @intCast(surface.*.w);
+    const height: usize = @intCast(surface.*.h);
+    const pitch: usize = @intCast(surface.*.pitch);
+    const pixels: [*]const u8 = @ptrCast(surface.*.pixels orelse return error.ScreenshotUnreadable);
+
+    const small_width = width / golden_scale;
+    const small_height = height / golden_scale;
+    const small = c.cairo_image_surface_create(
+        c.CAIRO_FORMAT_RGB24,
+        @intCast(small_width),
+        @intCast(small_height),
+    );
+    defer c.cairo_surface_destroy(small);
+    c.cairo_surface_flush(small);
+    const stride: usize = @intCast(c.cairo_image_surface_get_stride(small));
+    const data: [*]u8 = c.cairo_image_surface_get_data(small);
+    const block_pixels: u32 = golden_scale * golden_scale;
+    var y: usize = 0;
+    while (y < small_height) : (y += 1) {
+        var x: usize = 0;
+        while (x < small_width) : (x += 1) {
+            var sums = [3]u32{ 0, 0, 0 };
+            var dy: usize = 0;
+            while (dy < golden_scale) : (dy += 1) {
+                var dx: usize = 0;
+                while (dx < golden_scale) : (dx += 1) {
+                    const offset = (y * golden_scale + dy) * pitch + (x * golden_scale + dx) * 4;
+                    sums[0] += pixels[offset];
+                    sums[1] += pixels[offset + 1];
+                    sums[2] += pixels[offset + 2];
+                }
+            }
+            const target = y * stride + x * 4;
+            data[target] = @intCast(sums[0] / block_pixels);
+            data[target + 1] = @intCast(sums[1] / block_pixels);
+            data[target + 2] = @intCast(sums[2] / block_pixels);
+            data[target + 3] = 255;
+        }
+    }
+    c.cairo_surface_mark_dirty(small);
+
+    var path_buffer: [128]u8 = undefined;
+    const golden_path = try std.fmt.bufPrintZ(&path_buffer, "{s}/{s}.png", .{
+        golden_directory,
+        name,
+    });
+    if (build_options.update_golden) {
+        std.Io.Dir.cwd().createDirPath(std.testing.io, golden_directory) catch {};
+        const written = c.cairo_surface_write_to_png(small, golden_path.ptr);
+        try std.testing.expect(written == c.CAIRO_STATUS_SUCCESS);
+        return;
+    }
+
+    const golden = c.cairo_image_surface_create_from_png(golden_path.ptr);
+    defer c.cairo_surface_destroy(golden);
+    if (c.cairo_surface_status(golden) != c.CAIRO_STATUS_SUCCESS) {
+        std.debug.print(
+            "\nno reference screenshot {s}; create it with zig build test:native -Dupdate-golden\n",
+            .{golden_path},
+        );
+        return error.GoldenMissing;
+    }
+    const golden_width: usize = @intCast(c.cairo_image_surface_get_width(golden));
+    const golden_height: usize = @intCast(c.cairo_image_surface_get_height(golden));
+    if (golden_width != small_width or golden_height != small_height) {
+        std.debug.print("\nreference {s} is {d}x{d}, screenshot reduces to {d}x{d}\n", .{
+            golden_path,
+            golden_width,
+            golden_height,
+            small_width,
+            small_height,
+        });
+        return error.GoldenSizeMismatch;
+    }
+    c.cairo_surface_flush(golden);
+    const golden_stride: usize = @intCast(c.cairo_image_surface_get_stride(golden));
+    const golden_data: [*]const u8 = c.cairo_image_surface_get_data(golden);
+    var worst: u32 = 0;
+    var total: u64 = 0;
+    y = 0;
+    while (y < small_height) : (y += 1) {
+        var x: usize = 0;
+        while (x < small_width) : (x += 1) {
+            var channel: usize = 0;
+            while (channel < 3) : (channel += 1) {
+                const ours: i32 = data[y * stride + x * 4 + channel];
+                const theirs: i32 = golden_data[y * golden_stride + x * 4 + channel];
+                const difference: u32 = @intCast(@abs(ours - theirs));
+                worst = @max(worst, difference);
+                total += difference;
+            }
+        }
+    }
+    const mean = @as(f64, @floatFromInt(total)) /
+        @as(f64, @floatFromInt(small_width * small_height * 3));
+    if (worst > golden_pixel_tolerance or mean > golden_mean_tolerance) {
+        std.debug.print(
+            "\n{s} differs from its reference: worst channel difference {d}, mean {d:.2}; " ++
+                "inspect {s} and, if the change is intended, run " ++
+                "zig build test:native -Dupdate-golden\n",
+            .{ name, worst, mean, screenshot_path },
+        );
+        return error.ScreenshotDiffers;
+    }
+}
 
 fn drainInput(context: platform.Context) void {
     while (context.pollInput(std.testing.allocator)) |raw| {
@@ -436,6 +561,7 @@ test "the desktop renderer paints every surface through the native bridge" {
         });
         try std.testing.expect(context.saveScreenshot(path));
         context.endFrame();
+        try checkGolden(shot.name, path);
     }
     try std.testing.expect(renderer.thumbnails.liveCount() > 0);
     drainInput(context);

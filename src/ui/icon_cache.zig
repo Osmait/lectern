@@ -90,3 +90,32 @@ test "icons are cached per icon, color, and density" {
     _ = cache.get(context, .eraser, accent, 1.0).?;
     try std.testing.expectEqual(@as(usize, 4), cache.create_count);
 }
+
+test "the least recently used icon is evicted when the cache is full" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var cache = IconCache(mock.Backend){};
+    defer cache.deinit();
+
+    const first = theme.rgb(0, 0, 0);
+    const second = theme.rgb(1, 0, 0);
+    _ = cache.get(context, .pen, first, 1.0).?;
+    var shade: u8 = 1;
+    while (shade < capacity) : (shade += 1) {
+        _ = cache.get(context, .pen, theme.rgb(shade, 0, 0), 1.0).?;
+    }
+    try std.testing.expectEqual(@as(usize, capacity), cache.create_count);
+    try std.testing.expectEqual(@as(usize, 0), state.texture_deinit_count);
+
+    // Using the first icon again makes the second one the oldest.
+    _ = cache.get(context, .pen, first, 1.0).?;
+    _ = cache.get(context, .eraser, first, 1.0).?;
+    try std.testing.expectEqual(@as(usize, capacity + 1), cache.create_count);
+    try std.testing.expectEqual(@as(usize, 1), state.texture_deinit_count);
+    _ = cache.get(context, .pen, first, 1.0).?;
+    try std.testing.expectEqual(@as(usize, capacity + 1), cache.create_count);
+    _ = cache.get(context, .pen, second, 1.0).?;
+    try std.testing.expectEqual(@as(usize, capacity + 2), cache.create_count);
+    try std.testing.expectEqual(@as(usize, 2), state.texture_deinit_count);
+}

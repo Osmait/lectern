@@ -180,11 +180,11 @@ pub const Context = struct {
     }
 
     /// Draws colored triangles. Points, colors, and indices share the
-    /// bridge's memory layout, so nothing is copied here.
+    /// bridge's memory layout, so nothing is copied here or in the bridge.
     pub fn drawTriangles(
         self: Context,
         vertices: []const layout.Vec2,
-        colors: []const theme.Rgba,
+        colors: []const theme.FColor,
         indices: []const u32,
     ) void {
         std.debug.assert(vertices.len == colors.len);
@@ -454,10 +454,13 @@ pub const RenderQueue = struct {
     }
 
     fn startWorkerLocked(self: *RenderQueue) void {
-        self.thread = std.Thread.spawn(.{}, worker, .{self}) catch |err| {
+        const thread = std.Thread.spawn(.{}, worker, .{self}) catch |err| {
             std.log.warn("could not start the render thread: {s}", .{@errorName(err)});
             return;
         };
+        // The name only helps profilers and debuggers tell threads apart.
+        thread.setName(self.io, "br-render") catch {};
+        self.thread = thread;
     }
 
     fn worker(self: *RenderQueue) void {
@@ -556,6 +559,7 @@ comptime {
     checkSameLayout(layout.Vec2, c.BR_Point, "window point");
     checkSameLayout(layout.Rect, c.BR_Rect, "rectangle");
     checkSameLayout(theme.Rgba, c.BR_Color, "color");
+    checkSameLayout(theme.FColor, c.BR_FColor, "vertex color");
     checkSameLayout(u32, c_int, "triangle index");
     if (theme.icon_size != c.BR_ICON_SIZE) {
         @compileError("icon size does not match the native bridge");

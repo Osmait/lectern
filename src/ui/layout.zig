@@ -987,3 +987,49 @@ test "thumbnail rail scrolls independently and maps visible pages" {
     });
     try std.testing.expectEqual(@as(usize, 2), tiny.visibleThumbnails(0, 10).end);
 }
+
+test "thumbnail slots, image bounds, and scroll clamps follow the rail geometry" {
+    const layout = testLayout(.{
+        .document_open = true,
+        .navigation_visible = true,
+        .annotations_enabled = false,
+    });
+    const slot = layout.thumbnailSlot(3, 40);
+    try std.testing.expectEqual(@as(f32, 8), slot.x);
+    try std.testing.expectEqual(layout.navigation_width - 16, slot.w);
+    try std.testing.expectEqual(thumbnail_slot_height - 4, slot.h);
+    try std.testing.expectEqual(thumbnail_list_top - 40 + 3 * thumbnail_slot_height, slot.y);
+    const image = layout.thumbnailImageBounds(slot);
+    try std.testing.expectEqual(@as(f32, 16), image.x);
+    try std.testing.expectEqual(slot.y + 4, image.y);
+    try std.testing.expectEqual(layout.navigation_width - 32, image.w);
+    try std.testing.expectEqual(thumbnail_image_height, image.h);
+    try std.testing.expect(image.x + image.w <= slot.x + slot.w);
+
+    try std.testing.expectEqual(@as(f32, 0), layout.clampThumbnailScroll(-5, 10));
+    try std.testing.expectEqual(
+        layout.thumbnailMaxScroll(10),
+        layout.clampThumbnailScroll(1e9, 10),
+    );
+    try std.testing.expectEqual(@as(f32, 0), layout.clampThumbnailScroll(100, 1));
+    try std.testing.expectEqual(@as(f32, 30), layout.clampThumbnailScroll(30, 10));
+    try std.testing.expectEqual(
+        layout.window.height - thumbnail_list_top - thumbnail_bottom_margin,
+        layout.thumbnailViewportHeight(),
+    );
+}
+
+test "rectangles inset, grow, and report their bottom edge" {
+    const rect = Rect{ .x = 10, .y = 20, .w = 30, .h = 40 };
+    const smaller = rect.inset(5);
+    try std.testing.expectEqual(Rect{ .x = 15, .y = 25, .w = 20, .h = 30 }, smaller);
+    const larger = rect.inset(-2);
+    try std.testing.expectEqual(Rect{ .x = 8, .y = 18, .w = 34, .h = 44 }, larger);
+    try std.testing.expectEqual(@as(f32, 60), rect.bottom());
+    try std.testing.expectEqual(@as(f32, 25), rect.centerX());
+    try std.testing.expectEqual(@as(f32, 40), rect.centerY());
+    try std.testing.expect(!rect.isEmpty());
+    try std.testing.expect(rect.inset(20).isEmpty());
+    try std.testing.expect(rect.contains(.{ .x = 10, .y = 20 }));
+    try std.testing.expect(!rect.contains(.{ .x = 40, .y = 20 }));
+}

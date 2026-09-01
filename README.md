@@ -130,11 +130,14 @@ Run every local quality gate with:
 zig build ci --summary all
 ```
 
-The application tests run on an in-memory backend and need no native library;
-the native tests leave a screenshot of every interface surface in
-`.zig-cache/screenshots` for visual review.
+The application tests run on an in-memory backend and need no native library.
+The native tests leave a screenshot of every interface surface in
+`.zig-cache/screenshots` and compare each with its reference in
+`tests/golden`; the end-to-end tests drive the real application with
+synthetic input through SDL's dummy window.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [STYLE.md](STYLE.md), and the
 [architecture guide](docs/architecture.md) for the project structure and
-engineering conventions. The [testing strategy](docs/testing.md) records the
+engineering conventions, and the [profiling guide](docs/profiling.md) for
+the scripted session that feeds `perf` and flamegraphs. The [testing strategy](docs/testing.md) records the
 happy-path, failure-path, and boundary coverage required for every module.

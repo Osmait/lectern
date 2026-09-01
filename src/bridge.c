@@ -27,8 +27,12 @@ struct BR_Context {
     cairo_surface_t *measure_surface;
     cairo_t *measure;
     cairo_font_options_t *font_options;
-    SDL_Vertex *vertex_scratch;
-    size_t vertex_capacity;
+    /* Rectangles waiting to be drawn as one triangle list. */
+    BR_Point *quad_points;
+    BR_FColor *quad_colors;
+    int *quad_indices;
+    size_t quad_count;
+    size_t quad_capacity;
 };
 
 struct BR_Document {
@@ -43,22 +47,17 @@ struct BR_Image {
     int height;
 };
 
-/* Dark mode inverts the page with a lookup table instead of arithmetic per
- * channel: white paper becomes a dark surface and ink stays readable. The
- * table is filled once in br_init, before any worker thread can read it. */
-static uint8_t dark_table[256];
-
-static void init_dark_table(void) {
-    for (int value = 0; value < 256; ++value) {
-        dark_table[value] = (uint8_t)(235 - (value * 220) / 255);
-    }
-}
 
 struct BR_Texture {
     SDL_Texture *texture;
     int width;
     int height;
+    /* The tint last applied, so repeated draws skip two SDL calls. */
+    BR_Color tint;
+    int tint_known;
 };
+
+static void flush_quads(BR_Context *context);
 
 static char *copy_string(const char *text) {
     return strdup(text ? text : "Unknown native error");
@@ -99,7 +98,6 @@ BR_Context *br_init(char **error_message) {
         return NULL;
     }
 
-    init_dark_table();
     BR_Context *context = calloc(1, sizeof(*context));
     if (!context || !SDL_CreateWindowAndRenderer(
             "Book Read", BR_DEFAULT_WINDOW_WIDTH, BR_DEFAULT_WINDOW_HEIGHT,
@@ -132,7 +130,9 @@ void br_shutdown(BR_Context *context) {
     cairo_destroy(context->measure);
     cairo_surface_destroy(context->measure_surface);
     cairo_font_options_destroy(context->font_options);
-    free(context->vertex_scratch);
+    free(context->quad_points);
+    free(context->quad_colors);
+    free(context->quad_indices);
     free(context->last_error);
     SDL_DestroyRenderer(context->renderer);
     SDL_DestroyWindow(context->window);
@@ -349,6 +349,7 @@ void br_show_error(BR_Context *context, const char *message) {
 }
 
 int br_save_screenshot(BR_Context *context, const char *path) {
+    flush_quads(context);
     SDL_Surface *surface = SDL_RenderReadPixels(context->renderer, NULL);
     if (!surface) return 0;
     const int saved = SDL_SaveBMP(surface, path);
@@ -366,6 +367,76 @@ static SDL_FRect to_sdl_rect(BR_Rect rect) {
     return (SDL_FRect){rect.x, rect.y, rect.w, rect.h};
 }
 
+static SDL_FColor float_color(BR_Color color) {
+    const SDL_FColor result = {
+        color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f
+    };
+    return result;
+}
+
+/* The pending rectangles become one geometry command. */
+static void flush_quads(BR_Context *context) {
+    if (context->quad_count == 0) return;
+    static const float shared_uv[2] = {0.0f, 0.0f};
+    SDL_SetRenderDrawBlendMode(context->renderer, SDL_BLENDMODE_BLEND);
+    SDL_RenderGeometryRaw(context->renderer, NULL,
+                          (const float *)context->quad_points, (int)sizeof(BR_Point),
+                          (const SDL_FColor *)context->quad_colors, (int)sizeof(BR_FColor),
+                          shared_uv, 0,
+                          (int)(context->quad_count * 4),
+                          context->quad_indices, (int)(context->quad_count * 6),
+                          (int)sizeof(int));
+    context->quad_count = 0;
+}
+
+static int reserve_quads(BR_Context *context, size_t needed) {
+    if (context->quad_capacity >= needed) return 1;
+    size_t capacity = context->quad_capacity ? context->quad_capacity : 64;
+    while (capacity < needed) capacity *= 2;
+    BR_Point *points = realloc(context->quad_points, capacity * 4 * sizeof(*points));
+    if (!points) return 0;
+    context->quad_points = points;
+    BR_FColor *colors = realloc(context->quad_colors, capacity * 4 * sizeof(*colors));
+    if (!colors) return 0;
+    context->quad_colors = colors;
+    int *indices = realloc(context->quad_indices, capacity * 6 * sizeof(*indices));
+    if (!indices) return 0;
+    context->quad_indices = indices;
+    context->quad_capacity = capacity;
+    return 1;
+}
+
+static void queue_quad(BR_Context *context, float x, float y, float w, float h, BR_Color color) {
+    if (w <= 0 || h <= 0) return;
+    if (context->quad_count * 4 + 4 > INT_MAX / 2 ||
+        !reserve_quads(context, context->quad_count + 1)) {
+        /* Out of memory: draw what is queued and this one directly. */
+        flush_quads(context);
+        const SDL_FRect sdl_rect = {x, y, w, h};
+        set_color(context->renderer, color);
+        SDL_RenderFillRect(context->renderer, &sdl_rect);
+        return;
+    }
+    const size_t base = context->quad_count * 4;
+    BR_Point *points = context->quad_points + base;
+    points[0].x = x; points[0].y = y;
+    points[1].x = x + w; points[1].y = y;
+    points[2].x = x + w; points[2].y = y + h;
+    points[3].x = x; points[3].y = y + h;
+    const SDL_FColor fill = float_color(color);
+    for (size_t corner = 0; corner < 4; ++corner) {
+        context->quad_colors[base + corner].r = fill.r;
+        context->quad_colors[base + corner].g = fill.g;
+        context->quad_colors[base + corner].b = fill.b;
+        context->quad_colors[base + corner].a = fill.a;
+    }
+    int *indices = context->quad_indices + context->quad_count * 6;
+    const int first = (int)base;
+    indices[0] = first; indices[1] = first + 1; indices[2] = first + 2;
+    indices[3] = first; indices[4] = first + 2; indices[5] = first + 3;
+    context->quad_count += 1;
+}
+
 void br_frame_begin(BR_Context *context,
                     BR_Color clear_color,
                     float *width,
@@ -374,28 +445,34 @@ void br_frame_begin(BR_Context *context,
     update_render_density(context);
     br_window_size(context, width, height);
     *density = context->pixel_density;
+    context->quad_count = 0;
     SDL_SetRenderDrawBlendMode(context->renderer, SDL_BLENDMODE_BLEND);
     set_color(context->renderer, clear_color);
     SDL_RenderClear(context->renderer);
 }
 
 void br_frame_end(BR_Context *context) {
+    flush_quads(context);
     SDL_RenderPresent(context->renderer);
 }
 
 void br_fill_rect(BR_Context *context, BR_Rect rect, BR_Color color) {
-    const SDL_FRect sdl_rect = to_sdl_rect(rect);
-    set_color(context->renderer, color);
-    SDL_RenderFillRect(context->renderer, &sdl_rect);
+    queue_quad(context, rect.x, rect.y, rect.w, rect.h, color);
 }
 
+/* The outline covers the same pixels SDL_RenderRect would: one pixel wide,
+ * inside the rectangle. */
 void br_stroke_rect(BR_Context *context, BR_Rect rect, BR_Color color) {
-    const SDL_FRect sdl_rect = to_sdl_rect(rect);
-    set_color(context->renderer, color);
-    SDL_RenderRect(context->renderer, &sdl_rect);
+    if (rect.w < 1 || rect.h < 1) return;
+    queue_quad(context, rect.x, rect.y, rect.w, 1, color);
+    queue_quad(context, rect.x, rect.y + rect.h - 1, rect.w, 1, color);
+    if (rect.h <= 2) return;
+    queue_quad(context, rect.x, rect.y + 1, 1, rect.h - 2, color);
+    queue_quad(context, rect.x + rect.w - 1, rect.y + 1, 1, rect.h - 2, color);
 }
 
 void br_set_clip(BR_Context *context, const BR_Rect *rect) {
+    flush_quads(context);
     if (!rect) {
         SDL_SetRenderClipRect(context->renderer, NULL);
         return;
@@ -409,45 +486,35 @@ void br_draw_texture(BR_Context *context,
                      BR_Rect destination,
                      BR_Color tint) {
     if (!texture) return;
+    flush_quads(context);
     const SDL_FRect sdl_rect = to_sdl_rect(destination);
-    SDL_SetTextureColorMod(texture->texture, tint.r, tint.g, tint.b);
-    SDL_SetTextureAlphaMod(texture->texture, tint.a);
+    if (!texture->tint_known || texture->tint.r != tint.r || texture->tint.g != tint.g ||
+        texture->tint.b != tint.b || texture->tint.a != tint.a) {
+        SDL_SetTextureColorMod(texture->texture, tint.r, tint.g, tint.b);
+        SDL_SetTextureAlphaMod(texture->texture, tint.a);
+        texture->tint = tint;
+        texture->tint_known = 1;
+    }
     SDL_RenderTexture(context->renderer, texture->texture, NULL, &sdl_rect);
 }
 
 void br_draw_triangles(BR_Context *context,
                        const BR_Point *points,
-                       const BR_Color *colors,
+                       const BR_FColor *colors,
                        size_t point_count,
                        const int *indices,
                        size_t index_count) {
     if (point_count == 0 || index_count == 0 || point_count > INT_MAX ||
         index_count > INT_MAX) return;
-    if (context->vertex_capacity < point_count) {
-        /* Grow geometrically so a sequence of ever larger meshes does not
-         * reallocate on every call. */
-        size_t capacity = context->vertex_capacity ? context->vertex_capacity : 256;
-        while (capacity < point_count) capacity *= 2;
-        SDL_Vertex *grown = realloc(context->vertex_scratch,
-                                    capacity * sizeof(*grown));
-        if (!grown) return;
-        context->vertex_scratch = grown;
-        context->vertex_capacity = capacity;
-    }
-    for (size_t index = 0; index < point_count; ++index) {
-        const BR_Color color = colors[index];
-        const SDL_FColor fcolor = {
-            color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f
-        };
-        context->vertex_scratch[index].position.x = points[index].x;
-        context->vertex_scratch[index].position.y = points[index].y;
-        context->vertex_scratch[index].color = fcolor;
-        context->vertex_scratch[index].tex_coord.x = 0;
-        context->vertex_scratch[index].tex_coord.y = 0;
-    }
+    flush_quads(context);
+    static const float shared_uv[2] = {0.0f, 0.0f};
     SDL_SetRenderDrawBlendMode(context->renderer, SDL_BLENDMODE_BLEND);
-    SDL_RenderGeometry(context->renderer, NULL, context->vertex_scratch,
-                       (int)point_count, indices, (int)index_count);
+    SDL_RenderGeometryRaw(context->renderer, NULL,
+                          (const float *)points, (int)sizeof(*points),
+                          (const SDL_FColor *)colors, (int)sizeof(*colors),
+                          shared_uv, 0,
+                          (int)point_count, indices, (int)index_count,
+                          (int)sizeof(*indices));
 }
 
 /* ------------------------------------------------------------- textures */
@@ -480,6 +547,7 @@ static BR_Texture *texture_from_surface(BR_Context *context,
     texture->texture = sdl_texture;
     texture->width = width;
     texture->height = height;
+    texture->tint_known = 0;
     return texture;
 }
 
@@ -849,13 +917,28 @@ int br_pdf_page_size(const BR_Document *document,
     return 1;
 }
 
+/* Dark mode inverts the page so white paper becomes a dark surface and ink
+ * stays readable: every channel becomes 235 - value * 220 / 255. Two
+ * channels of a pixel are processed at once in the halves of one word, with
+ * the division in its exact shift-and-add form, so the compiler vectorizes
+ * the loop and a page costs one pass over memory; a lookup table cannot be
+ * vectorized and took more than twice as long. The page is opaque, so the
+ * alpha byte is simply set. */
+static inline uint32_t darken_lanes(uint32_t lanes) {
+    const uint32_t scaled = lanes * 220u;
+    const uint32_t quotient =
+        ((scaled + 0x00010001u + ((scaled >> 8) & 0x00FF00FFu)) >> 8) & 0x00FF00FFu;
+    return 0x00EB00EBu - quotient;
+}
+
 static void darken_surface(unsigned char *pixels, int width, int height, int stride) {
     for (int y = 0; y < height; ++y) {
-        unsigned char *row = pixels + (size_t)y * stride;
+        uint32_t *row = (uint32_t *)(pixels + (size_t)y * stride);
         for (int x = 0; x < width; ++x) {
-            row[x * 4 + 0] = dark_table[row[x * 4 + 0]];
-            row[x * 4 + 1] = dark_table[row[x * 4 + 1]];
-            row[x * 4 + 2] = dark_table[row[x * 4 + 2]];
+            const uint32_t pixel = row[x];
+            const uint32_t even = darken_lanes(pixel & 0x00FF00FFu);
+            const uint32_t odd = darken_lanes((pixel >> 8) & 0x00FF00FFu);
+            row[x] = (even | (odd << 8)) | 0xFF000000u;
         }
     }
 }

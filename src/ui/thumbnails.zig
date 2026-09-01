@@ -321,3 +321,41 @@ test "thumbnail storage is bounded and failures are not retried" {
     cache.requestVisible(&queue, document, 1, .{ .first = 0, .end = 1 }, false, 1.0);
     try std.testing.expectEqual(requests, cache.request_count);
 }
+
+test "the least recently viewed thumbnail is evicted first" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    state.page_count = capacity + 2;
+    const context = mock.Backend.Context{ .state = &state };
+    var document = try mock.Backend.Document.open(context, std.testing.allocator, "long.pdf");
+    defer document.deinit();
+    var queue = mock.Backend.RenderQueue{ .state = &state };
+    var cache = TestThumbnails.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.prepare(&queue, document.identity(), capacity + 2, false, 1.0);
+    var page_index: usize = 0;
+    while (page_index < capacity) : (page_index += 1) {
+        cache.requestVisible(&queue, document, 1, .{
+            .first = page_index,
+            .end = page_index + 1,
+        }, false, 1.0);
+        _ = deliver(&state, &queue, &cache);
+    }
+    try std.testing.expectEqual(@as(usize, capacity), cache.liveCount());
+
+    // Looking at the first page again keeps it; the second page, untouched
+    // since it arrived, goes first.
+    try std.testing.expect(cache.get(0).texture != null);
+    cache.requestVisible(&queue, document, 1, .{
+        .first = capacity,
+        .end = capacity + 1,
+    }, false, 1.0);
+    _ = deliver(&state, &queue, &cache);
+    try std.testing.expectEqual(@as(usize, capacity), cache.liveCount());
+    try std.testing.expectEqual(@as(usize, 1), state.texture_deinit_count);
+    try std.testing.expect(cache.get(1).missing);
+    try std.testing.expect(cache.get(0).texture != null);
+    try std.testing.expect(cache.get(capacity).texture != null);
+    try std.testing.expect(cache.get(2).texture != null);
+}

@@ -265,7 +265,7 @@ pub const Storage = struct {
     /// Starts the worker, or falls back to writing on the calling thread when
     /// the system refuses another thread.
     fn startWorkerLocked(self: *Storage) void {
-        self.thread = std.Thread.spawn(.{}, worker, .{self}) catch |err| {
+        const thread = std.Thread.spawn(.{}, worker, .{self}) catch |err| {
             std.log.warn("could not start the storage thread: {s}", .{@errorName(err)});
             while (self.pending.items.len > 0) {
                 const item = self.pending.orderedRemove(0);
@@ -274,6 +274,9 @@ pub const Storage = struct {
             }
             return;
         };
+        // The name only helps profilers and debuggers tell threads apart.
+        thread.setName(self.io, "br-storage") catch {};
+        self.thread = thread;
     }
 
     fn worker(self: *Storage) void {

@@ -71,14 +71,42 @@ pub fn Renderer(comptime backend: type) type {
             }
         };
 
+        const SwatchGeometry = struct {
+            mesh: geometry.Mesh = .{},
+            rects: [annotations.Color.swatches.len]Rect = undefined,
+            dark_mode: bool = false,
+            selected: annotations.Color = .blue,
+            hovered: ?annotations.Color = null,
+            valid: bool = false,
+            rebuild_count: usize = 0,
+        };
+
+        /// Identifies the stroke being drawn, so a frame can tell whether the
+        /// active points continue it or start another one.
+        const ActiveKey = struct {
+            document_identity: u64 = 0,
+            page_index: usize = 0,
+            page_rect: Rect = Rect.empty,
+            dark_mode: bool = false,
+            color: annotations.Color = .blue,
+            pen_size: annotations.PenSize = .medium,
+            first_point: annotations.Point = .{ .x = -1, .y = -1 },
+        };
+
         allocator: std.mem.Allocator,
         text_cache: TextCache = .{},
         icon_cache: IconCache = .{},
         thumbnails: Thumbnails,
         strokes: StrokeGeometry = .{},
-        /// Geometry rebuilt every frame: the stroke being drawn and the
-        /// swatches of the annotation margin.
-        scratch: geometry.Mesh = .{},
+        /// The stroke being drawn, extended point by point between frames.
+        active: geometry.StrokeBuilder = .{},
+        active_key: ActiveKey = .{},
+        /// Points handed to the active stroke builder; tests use it to prove
+        /// every point is tessellated once.
+        active_points_added: usize = 0,
+        /// The swatches of the annotation margin, rebuilt only when the
+        /// selection, the hover, the theme, or their positions change.
+        swatches: SwatchGeometry = .{},
         window_points: std.ArrayList(Vec2) = .empty,
         title_cache: TitleCache = .{},
         density: f32 = 1,
@@ -96,7 +124,8 @@ pub fn Renderer(comptime backend: type) type {
             self.icon_cache.deinit();
             self.thumbnails.deinit();
             self.strokes.mesh.deinit(self.allocator);
-            self.scratch.deinit(self.allocator);
+            self.active.deinit(self.allocator);
+            self.swatches.mesh.deinit(self.allocator);
             self.window_points.deinit(self.allocator);
             self.* = undefined;
         }
@@ -249,17 +278,46 @@ pub fn Renderer(comptime backend: type) type {
             }
 
             self.drawFinishedStrokes(context, frame, page_rect);
-            if (frame.active_stroke.len > 0) {
-                self.scratch.clear();
-                self.appendStroke(
-                    &self.scratch,
-                    page_rect,
-                    frame.active_stroke,
-                    theme_module.inkColor(frame.color, frame.dark_mode),
+            if (frame.active_stroke.len > 0) self.drawActiveStroke(context, frame, page_rect);
+        }
+
+        /// Extends the active stroke's geometry with the points that arrived
+        /// since the last frame instead of tessellating the whole stroke.
+        fn drawActiveStroke(
+            self: *Self,
+            context: backend.Context,
+            frame: Frame,
+            page_rect: Rect,
+        ) void {
+            const points = frame.active_stroke;
+            const key = ActiveKey{
+                .document_identity = frame.document_identity,
+                .page_index = frame.page_index,
+                .page_rect = page_rect,
+                .dark_mode = frame.dark_mode,
+                .color = frame.color,
+                .pen_size = frame.pen_size,
+                .first_point = points[0],
+            };
+            const continues = std.meta.eql(key, self.active_key) and
+                points.len >= self.active.pointCount();
+            if (!continues) {
+                self.active.reset(
                     theme_module.penWidth(frame.pen_size),
-                ) catch return;
-                self.drawMesh(context, self.scratch);
+                    theme_module.inkColor(frame.color, frame.dark_mode),
+                );
+                self.active_key = key;
             }
+            const known = self.active.pointCount();
+            self.window_points.clearRetainingCapacity();
+            self.window_points.ensureTotalCapacity(self.allocator, points.len - known) catch return;
+            for (points[known..]) |point| {
+                self.window_points.appendAssumeCapacity(toWindow(page_rect, point));
+            }
+            self.active_points_added += points.len - known;
+            self.active.extend(self.allocator, self.window_points.items) catch return;
+            self.drawMesh(context, self.active.strip);
+            self.drawMesh(context, self.active.rounds);
         }
 
         fn drawFinishedStrokes(
@@ -319,12 +377,16 @@ pub fn Renderer(comptime backend: type) type {
             self.window_points.clearRetainingCapacity();
             try self.window_points.ensureTotalCapacity(self.allocator, points.len);
             for (points) |point| {
-                self.window_points.appendAssumeCapacity(.{
-                    .x = page_rect.x + point.x * page_rect.w,
-                    .y = page_rect.y + point.y * page_rect.h,
-                });
+                self.window_points.appendAssumeCapacity(toWindow(page_rect, point));
             }
             try geometry.appendStroke(mesh, self.allocator, self.window_points.items, width, color);
+        }
+
+        fn toWindow(page_rect: Rect, point: annotations.Point) Vec2 {
+            return .{
+                .x = page_rect.x + point.x * page_rect.w,
+                .y = page_rect.y + point.y * page_rect.h,
+            };
         }
 
         fn drawMesh(self: *Self, context: backend.Context, mesh: geometry.Mesh) void {
@@ -493,16 +555,7 @@ pub fn Renderer(comptime backend: type) type {
 
             const label_x = panel.content_left;
             self.drawText(context, label_x, panel.ink_label_y, "Ink", 14, true, palette.muted);
-            self.scratch.clear();
-            for (panel.colors, annotations.Color.swatches) |rect, color| {
-                self.appendSwatch(
-                    .{ .x = rect.centerX(), .y = rect.centerY() },
-                    theme_module.inkColor(color, frame.dark_mode),
-                    frame.color == color,
-                    hover.isColor(color),
-                ) catch break;
-            }
-            self.drawMesh(context, self.scratch);
+            self.drawSwatches(context, frame, panel);
 
             self.drawText(context, label_x, panel.width_label_y, "Width", 14, true, palette.muted);
             const preview_widths = [_]f32{ 1, 3, 7 };
@@ -652,7 +705,44 @@ pub fn Renderer(comptime backend: type) type {
             self.drawText(context, rect.x + 40, text_y, row.label, 15, true, row.foreground);
         }
 
-        /// Appends the rings of one swatch to the scratch mesh. All swatches
+        /// Draws the ink swatches from one cached mesh; it is rebuilt only
+        /// when what it shows changes.
+        fn drawSwatches(
+            self: *Self,
+            context: backend.Context,
+            frame: Frame,
+            panel: layout_module.Panel,
+        ) void {
+            var hovered: ?annotations.Color = null;
+            for (annotations.Color.swatches) |color| {
+                if (frame.hover.isColor(color)) hovered = color;
+            }
+            const cache = &self.swatches;
+            const fresh = cache.valid and cache.dark_mode == frame.dark_mode and
+                cache.selected == frame.color and cache.hovered == hovered and
+                std.meta.eql(cache.rects, panel.colors);
+            if (!fresh) {
+                cache.valid = false;
+                cache.mesh.clear();
+                for (panel.colors, annotations.Color.swatches) |rect, color| {
+                    self.appendSwatch(
+                        .{ .x = rect.centerX(), .y = rect.centerY() },
+                        theme_module.inkColor(color, frame.dark_mode),
+                        frame.color == color,
+                        hovered == color,
+                    ) catch return;
+                }
+                cache.rects = panel.colors;
+                cache.dark_mode = frame.dark_mode;
+                cache.selected = frame.color;
+                cache.hovered = hovered;
+                cache.valid = true;
+                cache.rebuild_count += 1;
+            }
+            self.drawMesh(context, cache.mesh);
+        }
+
+        /// Appends the rings of one swatch to the swatch mesh. All swatches
         /// share a single draw call thanks to per-vertex colors.
         fn appendSwatch(
             self: *Self,
@@ -677,7 +767,7 @@ pub fn Renderer(comptime backend: type) type {
 
         fn appendRing(self: *Self, center: Vec2, radius: f32, color: Rgba) error{OutOfMemory}!void {
             try geometry.appendCircle(
-                &self.scratch,
+                &self.swatches.mesh,
                 self.allocator,
                 center,
                 radius,
@@ -853,21 +943,25 @@ fn testFrame(options: struct {
     strokes_revision: u64 = 0,
     active_stroke: []const annotations.Point = &.{},
     page_index: usize = 1,
+    page_count: usize = 8,
+    thumbnail_scroll: f32 = 0,
+    title: []const u8 = "Research Methods.pdf",
+    pen_size: annotations.PenSize = .medium,
 }) Frame {
     return .{
         .dark_mode = options.dark_mode,
         .document_open = options.document_open,
         .document_identity = 1,
         .page_index = options.page_index,
-        .page_count = 8,
+        .page_count = options.page_count,
         .zoom_percent = 100,
         .bookmarked = true,
-        .title = "Research Methods.pdf",
+        .title = options.title,
         .navigation_visible = options.navigation_visible,
-        .thumbnail_scroll = 0,
+        .thumbnail_scroll = options.thumbnail_scroll,
         .tool = options.tool,
         .color = .blue,
-        .pen_size = .medium,
+        .pen_size = options.pen_size,
         .save_status = options.save_status,
         .hover = options.hover,
         .page_rect = options.page_rect,
@@ -1056,4 +1150,434 @@ test "titles are truncated on codepoint boundaries using measured widths" {
     try std.testing.expectEqual(@as(usize, 2), clipToCodepoints("ñññ", 3).len);
     try std.testing.expectEqual(@as(usize, 0), previousCodepointBoundary("ñ", 1));
     try std.testing.expectEqual(@as(usize, 3), previousCodepointBoundary("abcd", 4));
+}
+
+const annotated_layout_options = layout_module.Options{
+    .document_open = true,
+    .navigation_visible = true,
+    .annotations_enabled = true,
+};
+
+fn underline(rect: Rect) Rect {
+    return .{ .x = rect.x, .y = rect.y + rect.h - 2, .w = rect.w, .h = 2 };
+}
+
+test "hover and selection highlight exactly the control they belong to" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var renderer = TestRenderer.init(std.testing.allocator);
+    defer renderer.deinit();
+    const layout = Layout.compute(state.window, annotated_layout_options);
+    const palette = theme_module.Palette.forMode(false);
+    const panel = layout.panel.?;
+    const toolbar = layout.toolbar;
+
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{
+        .tool = .pen,
+        .hover = .{ .toolbar = .next },
+    }), layout, null);
+    try std.testing.expect(state.filled(toolbar.next, palette.hover));
+    try std.testing.expect(!state.filled(toolbar.previous, palette.hover));
+    try std.testing.expect(!state.filled(panel.undo, palette.hover));
+    // Toggled buttons carry an accent underline: the rail is visible, the
+    // page is bookmarked, and the pen is active.
+    try std.testing.expect(state.filled(underline(toolbar.pages), palette.accent));
+    try std.testing.expect(state.filled(underline(toolbar.bookmark), palette.accent));
+    try std.testing.expect(state.filled(underline(toolbar.annotations), palette.accent));
+    try std.testing.expect(!state.filled(underline(toolbar.theme), palette.accent));
+
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{
+        .tool = .pen,
+        .hover = .{ .panel = .undo },
+    }), layout, null);
+    try std.testing.expect(state.filled(panel.undo, palette.hover));
+    try std.testing.expect(!state.filled(panel.clear, palette.hover));
+    try std.testing.expect(!state.filled(toolbar.next, palette.hover));
+
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{
+        .tool = .pen,
+        .hover = .{ .thumbnail = 2 },
+    }), layout, null);
+    try std.testing.expect(state.filled(layout.thumbnailSlot(2, 0), palette.hover));
+    try std.testing.expect(!state.filled(layout.thumbnailSlot(1, 0), palette.hover));
+
+    // The selected size button is outlined with the accent; the others with
+    // the border color.
+    try std.testing.expect(state.outlined(panel.sizes[1], palette.accent));
+    try std.testing.expect(state.outlined(panel.sizes[0], palette.border));
+    try std.testing.expect(state.outlined(panel.sizes[2], palette.border));
+}
+
+test "the status row shows the save state in its color" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var renderer = TestRenderer.init(std.testing.allocator);
+    defer renderer.deinit();
+    const layout = Layout.compute(state.window, annotated_layout_options);
+    const palette = theme_module.Palette.forMode(false);
+    const panel = layout.panel.?;
+
+    const Expectation = struct {
+        status: frame_module.SaveStatus,
+        icon: Icon,
+        icon_color: Rgba,
+        text_color: Rgba,
+    };
+    const expectations = [_]Expectation{
+        .{
+            .status = .saved,
+            .icon = .saved,
+            .icon_color = palette.success,
+            .text_color = palette.muted,
+        },
+        .{
+            .status = .pending,
+            .icon = .saved,
+            .icon_color = palette.muted,
+            .text_color = palette.muted,
+        },
+        .{
+            .status = .failed,
+            .icon = .alert,
+            .icon_color = palette.danger,
+            .text_color = palette.danger,
+        },
+    };
+    for (expectations) |expectation| {
+        _ = context.beginFrame(palette.background);
+        _ = renderer.draw(context, testFrame(.{
+            .tool = .pen,
+            .save_status = expectation.status,
+        }), layout, null);
+        const text = state.textDraw(expectation.status.label()) orelse return error.StatusNotDrawn;
+        try std.testing.expectEqual(expectation.text_color, text.tint);
+        try std.testing.expect(mock.rectInside(text.rect, panel.bounds));
+        try std.testing.expectApproxEqAbs(panel.save_status_y + 1, text.rect.y, 0.01);
+        try std.testing.expectEqual(expectation.icon_color, state.iconColor(expectation.icon).?);
+        const icon = state.iconDraw(expectation.icon).?;
+        const row_center = panel.save_status_y + layout_module.panel_status_height / 2;
+        try std.testing.expectApproxEqAbs(row_center, icon.rect.centerY(), 0.01);
+    }
+    // Only one of the two status icons is drawn per frame.
+    try std.testing.expectEqual(@as(?theme_module.Rgba, null), state.iconColor(.saved));
+}
+
+test "toolbar labels are centered in their slots and the title sits in the open button" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var renderer = TestRenderer.init(std.testing.allocator);
+    defer renderer.deinit();
+    const layout = Layout.compute(state.window, annotated_layout_options);
+    const palette = theme_module.Palette.forMode(false);
+    const toolbar = layout.toolbar;
+
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{ .tool = .pen }), layout, null);
+    const page_label = state.textDraw("2 / 8") orelse return error.PageLabelNotDrawn;
+    try std.testing.expectApproxEqAbs(toolbar.page_label.centerX(), page_label.rect.centerX(), 0.5);
+    try std.testing.expect(mock.rectInside(page_label.rect, toolbar.page_label));
+    const zoom = state.textDraw("100%") orelse return error.ZoomLabelNotDrawn;
+    try std.testing.expectApproxEqAbs(toolbar.zoom_reset.centerX(), zoom.rect.centerX(), 0.5);
+    // The long fixture title does not fit the button and is shortened with
+    // an ellipsis; a short one is drawn whole. Both stay inside the button.
+    const shortened = state.textDrawPrefixed("Research") orelse return error.TitleNotDrawn;
+    try std.testing.expect(std.mem.endsWith(u8, shortened.text, "..."));
+    try std.testing.expect(shortened.text.len < "Research Methods.pdf".len);
+    try std.testing.expect(mock.rectInside(shortened.draw.rect, toolbar.open));
+    try std.testing.expectEqual(palette.header_text, shortened.draw.tint);
+    // Icon textures carry transparent padding, so only their center is
+    // expected inside the button.
+    const open_icon = state.iconDraw(.open) orelse return error.OpenIconNotDrawn;
+    try std.testing.expect(toolbar.open.contains(.{
+        .x = open_icon.rect.centerX(),
+        .y = open_icon.rect.centerY(),
+    }));
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{ .tool = .pen, .title = "book.pdf" }), layout, null);
+    const title = state.textDraw("book.pdf") orelse return error.TitleNotDrawn;
+    try std.testing.expect(mock.rectInside(title.rect, toolbar.open));
+
+    // Without a document the counter shows no page and the button invites
+    // to open one.
+    const closed = Layout.compute(state.window, .{
+        .document_open = false,
+        .navigation_visible = false,
+        .annotations_enabled = false,
+    });
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{ .document_open = false }), closed, null);
+    try std.testing.expect(state.textDraw("0 / 8") != null);
+    try std.testing.expect(state.textDraw("Open PDF") != null);
+    try std.testing.expectEqual(@as(?mock.DrawnTexture, null), state.textDraw("2 / 8"));
+}
+
+fn scrollbarThumb(state: *const mock.State, navigation_width: f32) ?Rect {
+    for (state.fills.items) |fill| {
+        const at_edge = @abs(fill.rect.x - (navigation_width - 4)) < 0.01;
+        if (at_edge and fill.rect.w == 2) return fill.rect;
+    }
+    return null;
+}
+
+test "the rail is clipped and its scrollbar follows the scroll position" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var renderer = TestRenderer.init(std.testing.allocator);
+    defer renderer.deinit();
+    const layout = Layout.compute(state.window, .{
+        .document_open = true,
+        .navigation_visible = true,
+        .annotations_enabled = false,
+    });
+    const palette = theme_module.Palette.forMode(false);
+    const page_count = 40;
+    const track_top = layout_module.thumbnail_list_top;
+    const track_bottom = layout.window.height - 8;
+
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{ .page_count = page_count }), layout, null);
+    try std.testing.expectEqual(@as(usize, 2), state.clips.items.len);
+    const clip = state.clips.items[0].?;
+    try std.testing.expectApproxEqAbs(track_top, clip.y, 0.01);
+    try std.testing.expectApproxEqAbs(layout.navigation_width - 1, clip.w, 0.01);
+    try std.testing.expectEqual(@as(?Rect, null), state.clips.items[1]);
+    const at_top = scrollbarThumb(&state, layout.navigation_width) orelse return error.NoScrollbar;
+    try std.testing.expectApproxEqAbs(track_top, at_top.y, 0.01);
+    try std.testing.expect(at_top.h >= 32);
+
+    const maximum = layout.thumbnailMaxScroll(page_count);
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{
+        .page_count = page_count,
+        .thumbnail_scroll = maximum,
+    }), layout, null);
+    const at_bottom = scrollbarThumb(&state, layout.navigation_width) orelse {
+        return error.NoScrollbar;
+    };
+    try std.testing.expectApproxEqAbs(track_bottom, at_bottom.bottom(), 0.01);
+    try std.testing.expectApproxEqAbs(at_top.h, at_bottom.h, 0.01);
+
+    // A rail that fits every page has no scrollbar at all.
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{ .page_count = 2 }), layout, null);
+    try std.testing.expectEqual(@as(?Rect, null), scrollbarThumb(&state, layout.navigation_width));
+}
+
+test "thumbnail slots mark the selected page and stand in for missing renders" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var renderer = TestRenderer.init(std.testing.allocator);
+    defer renderer.deinit();
+    const layout = Layout.compute(state.window, .{
+        .document_open = true,
+        .navigation_visible = true,
+        .annotations_enabled = false,
+    });
+    const palette = theme_module.Palette.forMode(false);
+
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{}), layout, null);
+    const selected = layout.thumbnailImageBounds(layout.thumbnailSlot(1, 0));
+    const other = layout.thumbnailImageBounds(layout.thumbnailSlot(0, 0));
+    try std.testing.expect(state.filled(selected, palette.surface));
+    try std.testing.expect(state.filled(other, palette.surface));
+    try std.testing.expect(state.outlined(selected, palette.accent));
+    try std.testing.expect(state.outlined(selected.inset(-2), palette.accent));
+    try std.testing.expect(state.outlined(other, palette.border));
+    try std.testing.expect(!state.outlined(other, palette.accent));
+    try std.testing.expectEqual(palette.accent, state.textDraw("2").?.tint);
+    try std.testing.expectEqual(palette.muted, state.textDraw("1").?.tint);
+    const label = state.textDraw("2").?;
+    try std.testing.expectApproxEqAbs(layout.navigation_width / 2, label.rect.centerX(), 0.5);
+}
+
+test "dark mode paints the chrome, paper, and ink with the dark palette" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var renderer = TestRenderer.init(std.testing.allocator);
+    defer renderer.deinit();
+    const layout = Layout.compute(state.window, annotated_layout_options);
+    const page_rect = layout.pageRect(.{ .width = 612, .height = 792 }, 1.0);
+    const rail = layout.railRect().?;
+    var notebook = annotations.Notebook.init(std.testing.allocator);
+    defer notebook.deinit();
+    try notebook.open(8);
+    notebook.selectPen();
+    notebook.selectColor(.black);
+    _ = try notebook.beginStroke(1, .{ .x = 0.1, .y = 0.1 });
+    _ = try notebook.appendPoint(.{ .x = 0.5, .y = 0.5 });
+    _ = try notebook.finishStroke();
+
+    for ([_]bool{ false, true }) |dark_mode| {
+        const palette = theme_module.Palette.forMode(dark_mode);
+        _ = context.beginFrame(palette.background);
+        _ = renderer.draw(context, testFrame(.{
+            .tool = .pen,
+            .dark_mode = dark_mode,
+            .page_rect = page_rect,
+            .strokes = notebook.strokesOn(1),
+            .strokes_revision = notebook.revision,
+        }), layout, null);
+        try std.testing.expect(state.filled(page_rect, palette.paper));
+        try std.testing.expect(state.outlined(page_rect, palette.border));
+        try std.testing.expect(state.filled(rail, palette.panel));
+        try std.testing.expect(state.filled(layout.panel.?.bounds, palette.panel));
+        // Black ink is drawn light on the inverted page.
+        try std.testing.expectEqual(@as(usize, 2), state.batches.items.len);
+        try std.testing.expectEqual(
+            theme_module.toFloat(theme_module.inkColor(.black, dark_mode)),
+            state.batches.items[0].first_color,
+        );
+    }
+}
+
+test "a rendered page is drawn in its rectangle and the empty state is centered" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var document = try mock.Backend.Document.open(context, std.testing.allocator, "book.pdf");
+    defer document.deinit();
+    var page = try document.render(context, 1, 1.0, false);
+    defer page.deinit();
+    var renderer = TestRenderer.init(std.testing.allocator);
+    defer renderer.deinit();
+    const palette = theme_module.Palette.forMode(false);
+    const layout = Layout.compute(state.window, .{
+        .document_open = true,
+        .navigation_visible = false,
+        .annotations_enabled = false,
+    });
+    const page_rect = layout.pageRect(.{ .width = 612, .height = 792 }, 1.0);
+
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{
+        .navigation_visible = false,
+        .page_rect = page_rect,
+    }), layout, page);
+    const drawn = state.pageDraw() orelse return error.PageNotDrawn;
+    try std.testing.expect(mock.sameRect(page_rect, drawn.rect));
+    try std.testing.expectEqual(theme_module.white, drawn.tint);
+    try std.testing.expect(!state.filled(page_rect, palette.paper));
+
+    const closed = Layout.compute(state.window, .{
+        .document_open = false,
+        .navigation_visible = false,
+        .annotations_enabled = false,
+    });
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{
+        .document_open = false,
+        .navigation_visible = false,
+    }), closed, null);
+    const message = state.textDraw("OPEN A PDF TO START") orelse return error.EmptyStateNotDrawn;
+    try std.testing.expectApproxEqAbs(closed.content.centerX(), message.rect.centerX(), 0.5);
+    try std.testing.expectApproxEqAbs(closed.window.height / 2, message.rect.y, 0.01);
+    try std.testing.expectEqual(palette.muted, message.tint);
+    try std.testing.expectEqual(@as(?mock.DrawnTexture, null), state.pageDraw());
+}
+
+test "the active stroke is extended point by point, not rebuilt every frame" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var renderer = TestRenderer.init(std.testing.allocator);
+    defer renderer.deinit();
+    const layout = Layout.compute(state.window, annotated_layout_options);
+    const page_rect = layout.pageRect(.{ .width = 612, .height = 792 }, 1.0);
+    var notebook = annotations.Notebook.init(std.testing.allocator);
+    defer notebook.deinit();
+    try notebook.open(8);
+    notebook.selectPen();
+
+    _ = try notebook.beginStroke(1, .{ .x = 0.1, .y = 0.5 });
+    var index: usize = 1;
+    while (index <= 30) : (index += 1) {
+        if (index > 1) {
+            const t: f32 = @floatFromInt(index);
+            _ = try notebook.appendPoint(.{ .x = 0.1 + t * 0.02, .y = 0.5 + @sin(t) * 0.05 });
+        }
+        _ = context.beginFrame(theme_module.white);
+        _ = renderer.draw(context, testFrame(.{
+            .tool = .pen,
+            .page_rect = page_rect,
+            .active_stroke = notebook.activePoints(),
+        }), layout, null);
+        try std.testing.expect(state.batches.items.len <= 3);
+    }
+    try std.testing.expectEqual(@as(usize, 30), renderer.active_points_added);
+    try std.testing.expectEqual(@as(usize, 30), renderer.active.pointCount());
+    try std.testing.expectEqual(@as(usize, 29), renderer.active.stable_count);
+
+    // Finishing the stroke and starting another one elsewhere starts over.
+    _ = try notebook.finishStroke();
+    _ = try notebook.beginStroke(1, .{ .x = 0.8, .y = 0.2 });
+    _ = context.beginFrame(theme_module.white);
+    _ = renderer.draw(context, testFrame(.{
+        .tool = .pen,
+        .page_rect = page_rect,
+        .strokes = notebook.strokesOn(1),
+        .strokes_revision = notebook.revision,
+        .active_stroke = notebook.activePoints(),
+    }), layout, null);
+    try std.testing.expectEqual(@as(usize, 31), renderer.active_points_added);
+    try std.testing.expectEqual(@as(usize, 1), renderer.active.pointCount());
+
+    // A different pen size mid-stroke is a new stroke too.
+    _ = context.beginFrame(theme_module.white);
+    _ = renderer.draw(context, testFrame(.{
+        .tool = .pen,
+        .page_rect = page_rect,
+        .strokes = notebook.strokesOn(1),
+        .strokes_revision = notebook.revision,
+        .active_stroke = notebook.activePoints(),
+        .pen_size = .thick,
+    }), layout, null);
+    try std.testing.expectEqual(@as(usize, 32), renderer.active_points_added);
+}
+
+test "swatch geometry is rebuilt only when the selection, hover, theme, or panel change" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var renderer = TestRenderer.init(std.testing.allocator);
+    defer renderer.deinit();
+    const layout = Layout.compute(state.window, annotated_layout_options);
+    const panel = layout.panel.?;
+
+    _ = context.beginFrame(theme_module.white);
+    _ = renderer.draw(context, testFrame(.{ .tool = .pen }), layout, null);
+    _ = context.beginFrame(theme_module.white);
+    _ = renderer.draw(context, testFrame(.{ .tool = .pen }), layout, null);
+    try std.testing.expectEqual(@as(usize, 1), renderer.swatches.rebuild_count);
+    try std.testing.expectEqual(@as(usize, 1), state.batches.items.len);
+
+    _ = context.beginFrame(theme_module.white);
+    _ = renderer.draw(context, testFrame(.{
+        .tool = .pen,
+        .hover = layout.hoverAt(.{
+            .x = panel.colors[2].centerX(),
+            .y = panel.colors[2].centerY(),
+        }, true, 0, 8),
+    }), layout, null);
+    try std.testing.expectEqual(@as(usize, 2), renderer.swatches.rebuild_count);
+    _ = context.beginFrame(theme_module.white);
+    _ = renderer.draw(context, testFrame(.{ .tool = .pen, .dark_mode = true }), layout, null);
+    try std.testing.expectEqual(@as(usize, 3), renderer.swatches.rebuild_count);
+
+    const wider = Layout.compute(.{ .width = 1400, .height = 900 }, annotated_layout_options);
+    _ = context.beginFrame(theme_module.white);
+    _ = renderer.draw(context, testFrame(.{ .tool = .pen, .dark_mode = true }), wider, null);
+    try std.testing.expectEqual(@as(usize, 4), renderer.swatches.rebuild_count);
+    _ = context.beginFrame(theme_module.white);
+    _ = renderer.draw(context, testFrame(.{ .tool = .pen, .dark_mode = true }), wider, null);
+    try std.testing.expectEqual(@as(usize, 4), renderer.swatches.rebuild_count);
 }

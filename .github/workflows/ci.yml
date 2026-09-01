@@ -34,10 +34,12 @@ jobs:
           echo "Server=https://archive.archlinux.org/repos/${ARCH_SNAPSHOT}/\$repo/os/\$arch"
           > /etc/pacman.d/mirrorlist
 
-      - name: Install Zig and native libraries
+      # Noto Sans is the interface font; the reference screenshots in
+      # tests/golden were rendered with it.
+      - name: Install Zig, native libraries, and the interface font
         run: >-
           pacman -Syyu --noconfirm --needed
-          zig sdl3 poppler-glib cairo pkgconf
+          zig sdl3 poppler-glib cairo pkgconf noto-fonts
 
       - name: Show toolchain version
         run: zig version

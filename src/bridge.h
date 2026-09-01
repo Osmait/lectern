@@ -105,6 +105,14 @@ typedef struct {
     uint8_t a;
 } BR_Color;
 
+/* A vertex color, in SDL's layout so meshes are drawn without conversion. */
+typedef struct {
+    float r;
+    float g;
+    float b;
+    float a;
+} BR_FColor;
+
 enum {
     BR_ICON_OPEN = 0,
     BR_ICON_PREVIOUS,
@@ -163,6 +171,9 @@ void br_frame_begin(BR_Context *context,
                     float *height,
                     float *density);
 void br_frame_end(BR_Context *context);
+/* Consecutive rectangles are collected and drawn as one triangle list; any
+ * other drawing command, a clip change, or the end of the frame draws the
+ * collected ones first, so the painter's order is kept. */
 void br_fill_rect(BR_Context *context, BR_Rect rect, BR_Color color);
 void br_stroke_rect(BR_Context *context, BR_Rect rect, BR_Color color);
 void br_set_clip(BR_Context *context, const BR_Rect *rect);
@@ -170,10 +181,10 @@ void br_draw_texture(BR_Context *context,
                      BR_Texture *texture,
                      BR_Rect destination,
                      BR_Color tint);
-/* One color per point. */
+/* One color per point; the arrays are handed to SDL as they are. */
 void br_draw_triangles(BR_Context *context,
                        const BR_Point *points,
-                       const BR_Color *colors,
+                       const BR_FColor *colors,
                        size_t point_count,
                        const int *indices,
                        size_t index_count);

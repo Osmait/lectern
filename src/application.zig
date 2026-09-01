@@ -246,17 +246,26 @@ pub fn ApplicationType(comptime backend: type) type {
                     const timeout = self.waitTimeout(self.context.ticksMs());
                     next = self.context.waitInput(self.allocator, timeout);
                 }
-                while (next) |raw| {
-                    self.handleInput(raw);
-                    next = self.context.pollInput(self.allocator);
-                }
-                self.update(self.context.ticksMs());
-                if (self.needs_redraw) {
-                    self.needs_redraw = false;
-                    self.draw();
-                }
+                self.step(next);
             }
             self.flushState();
+        }
+
+        /// One turn of the frame loop: handles `first` and every input queued
+        /// behind it, runs due timers, collects finished work, and repaints
+        /// when needed. `run` sleeps between turns; end-to-end drivers call
+        /// this directly with the input they polled themselves.
+        pub fn step(self: *Self, first: ?RawInput) void {
+            var next = first;
+            while (next) |raw| {
+                self.handleInput(raw);
+                next = self.context.pollInput(self.allocator);
+            }
+            self.update(self.context.ticksMs());
+            if (self.needs_redraw) {
+                self.needs_redraw = false;
+                self.draw();
+            }
         }
 
         /// Milliseconds the loop may sleep before the earliest timer is due,
@@ -1862,6 +1871,33 @@ test "interactive run loop waits for input, redraws on demand, and exits" {
     // Nothing is due, so the loop sleeps until something happens.
     try std.testing.expectEqual(@as(?u32, null), state.last_wait_timeout);
     try std.testing.expect(!application.running);
+}
+
+test "a loop step drains queued input, runs timers, and repaints once" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    try state.pushInput(.{ .kind = .key_down, .key = .p });
+    try state.pushInput(.{ .kind = .key_down, .key = .c });
+    var harness: Harness = undefined;
+    harness.init(std.testing.allocator, &state);
+    defer harness.deinit();
+    const application = &harness.application;
+    try application.openPdf("book.pdf");
+    application.needs_redraw = false;
+
+    application.step(state.takeInput(std.testing.allocator));
+    try std.testing.expectEqual(annotations.Tool.pen, application.notebook.tool);
+    try std.testing.expectEqual(annotations.Color.red, application.notebook.color);
+    try std.testing.expectEqual(@as(usize, 1), state.frame_count);
+    try std.testing.expect(!application.needs_redraw);
+
+    // A step without input still runs due timers.
+    application.handleCommand(.zoom_in);
+    state.ticks += TestApplication.page_render_delay_ms;
+    const renders = state.render_count;
+    application.step(null);
+    try std.testing.expect(state.render_count > renders);
+    try std.testing.expectEqual(@as(?u64, null), application.render_timer);
 }
 
 test "drawing without a document shows the empty state and never renders" {

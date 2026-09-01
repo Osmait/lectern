@@ -36,9 +36,11 @@ The CI contract includes:
 - Application, interface, and storage tests with an in-memory backend; they
   link no native library
 - Native bridge and platform contract tests with SDL's dummy video backend,
-  which also write one screenshot per surface to `.zig-cache/screenshots`
-- A headless end-to-end PDF rendering and annotation test in a temporary
-  state directory
+  which write one screenshot per surface to `.zig-cache/screenshots` and
+  compare each with its reference in `tests/golden`
+- End-to-end tests that drive the production application with synthetic
+  native events through the real window, worker threads, and files
+- A headless smoke run of the binary in a temporary state directory
 - A `ReleaseSafe` build
 
 Useful targeted commands:
@@ -50,10 +52,19 @@ zig build test:unit
 zig build test:application
 zig build test:tools
 zig build test:native
+zig build test:native -Dupdate-golden
+zig build test:e2e
 zig build test:integration
 zig build test -Dtest-filter=bookmark
 zig build check:release
+zig build profile
 ```
+
+`zig build profile` builds the headless session used for profiling; see
+[docs/profiling.md](docs/profiling.md).
+
+Regenerate the reference screenshots with `-Dupdate-golden` only when a
+visual change is intended, and commit the updated images with the change.
 
 ## Change guidelines
 

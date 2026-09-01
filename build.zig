@@ -89,6 +89,17 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "book_read", .module = core_module }},
     });
     addNativeLibraries(b, desktop_module);
+
+    // The native tests compare screenshots with reference images; this
+    // option rewrites the references from the current rendering instead.
+    const update_golden = b.option(
+        bool,
+        "update-golden",
+        "Rewrite the reference screenshots in tests/golden instead of comparing",
+    ) orelse false;
+    const test_options = b.addOptions();
+    test_options.addOption(bool, "update_golden", update_golden);
+
     const native_test_module = b.createModule(.{
         .root_source_file = b.path("tests/native_tests.zig"),
         .target = target,
@@ -96,10 +107,12 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "book_read", .module = core_module },
             .{ .name = "app", .module = desktop_module },
+            .{ .name = "build_options", .module = test_options.createModule() },
         },
     });
     native_test_module.addIncludePath(b.path("src"));
     native_test_module.linkSystemLibrary("sdl3", .{});
+    native_test_module.linkSystemLibrary("cairo", .{});
     const native_tests = b.addTest(.{
         .root_module = native_test_module,
         .filters = test_filters,
@@ -109,6 +122,32 @@ pub fn build(b: *std.Build) void {
     const test_native_step = b.step("test:native", "Run native bridge and platform tests");
     test_native_step.dependOn(&run_native_tests.step);
     test_step.dependOn(test_native_step);
+
+    // End-to-end tests drive the production application through the real
+    // window, renderer, worker threads, and files with synthetic events.
+    const end_to_end_module = b.createModule(.{
+        .root_source_file = b.path("tests/end_to_end_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "book_read", .module = core_module },
+            .{ .name = "app", .module = desktop_module },
+        },
+    });
+    end_to_end_module.addIncludePath(b.path("src"));
+    end_to_end_module.linkSystemLibrary("sdl3", .{});
+    const end_to_end_tests = b.addTest(.{
+        .root_module = end_to_end_module,
+        .filters = test_filters,
+    });
+    const run_end_to_end_tests = b.addRunArtifact(end_to_end_tests);
+    run_end_to_end_tests.setEnvironmentVariable("SDL_VIDEODRIVER", "dummy");
+    const test_end_to_end_step = b.step(
+        "test:e2e",
+        "Drive the production application end to end with synthetic input",
+    );
+    test_end_to_end_step.dependOn(&run_end_to_end_tests.step);
+    test_step.dependOn(test_end_to_end_step);
 
     const format_command = b.addSystemCommand(&.{
         b.graph.zig_exe,
@@ -173,6 +212,38 @@ pub fn build(b: *std.Build) void {
     });
     const release_check_step = b.step("check:release", "Compile a ReleaseSafe executable");
     release_check_step.dependOn(&release_executable.step);
+
+    // A headless workload for profilers: optimized, with frame pointers and
+    // debug info so `perf` attributes samples to functions.
+    const profile_core_module = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .omit_frame_pointer = false,
+    });
+    const profile_desktop_module = b.createModule(.{
+        .root_source_file = b.path("src/desktop.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .omit_frame_pointer = false,
+        .imports = &.{.{ .name = "book_read", .module = profile_core_module }},
+    });
+    addNativeLibraries(b, profile_desktop_module);
+    const profile_module = b.createModule(.{
+        .root_source_file = b.path("tools/profile_session.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .omit_frame_pointer = false,
+        .imports = &.{.{ .name = "app", .module = profile_desktop_module }},
+    });
+    profile_module.addIncludePath(b.path("src"));
+    profile_module.linkSystemLibrary("sdl3", .{});
+    const profile_executable = b.addExecutable(.{
+        .name = "book-read-profile",
+        .root_module = profile_module,
+    });
+    const profile_step = b.step("profile", "Build the headless profiling workload");
+    profile_step.dependOn(&b.addInstallArtifact(profile_executable, .{}).step);
 
     const ci_step = b.step("ci", "Run every required continuous-integration check");
     ci_step.dependOn(lint_step);

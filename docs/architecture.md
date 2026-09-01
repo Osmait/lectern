@@ -72,13 +72,18 @@ the application stores that hover and hands it to the renderer inside the
 `Frame`, so repaint decisions and highlights always agree. `ui/input.zig`
 turns raw window input into typed `Command` values. `ui/theme.zig` holds the
 palettes, the ink colors and pen widths of annotations, and icon identities.
-`ui/geometry.zig` converts strokes and circles into colored triangle lists;
-the unit circle is computed at compile time and round joins are only added
-where a stroke turns sharply. `ui/renderer.zig` paints a `Frame` through the
-backend primitives and owns the text, icon, and thumbnail caches
+`ui/geometry.zig` converts strokes and circles into colored triangle lists
+whose vertex colors already have the bridge's float layout; the unit circle
+is computed at compile time and round joins are only added where a stroke
+turns sharply. Its `StrokeBuilder` extends the stroke being drawn one point
+at a time, rebuilding only the tail. `ui/renderer.zig` paints a `Frame`
+through the backend primitives and owns the text, icon, and thumbnail caches
 (`ui/text_cache.zig`, `ui/icon_cache.zig`, `ui/thumbnails.zig`). Finished
-strokes are tessellated once per page revision and drawn as a single batch;
-the swatches of the margin share another batch thanks to per-vertex colors.
+strokes are tessellated once per page revision and drawn as a single batch,
+the active stroke grows incrementally, and the swatches of the margin are
+one cached batch that changes only with the selection, the hover, or the
+theme. The text cache finds entries by a hash of text, size, weight, and
+density.
 
 The renderer is generic over the backend type. Production uses the SDL adapter;
 tests use `testing/mock_backend.zig`, which counts every primitive call.
@@ -194,8 +199,12 @@ icon rasterization, and PDF page rasterization at a requested scale, either
 straight to a texture on the main thread or to an image that any thread may
 produce and the main thread uploads later. A wake call from any thread ends
 the input wait. Text is rasterized white and tinted at draw time so one
-texture serves every color. Dark mode inverts page pixels through a lookup
-table that is filled once before any worker starts.
+texture serves every color, and a texture remembers its last tint so
+repeated draws skip the modulation calls. Consecutive rectangles are
+collected and drawn as one triangle list; any other command flushes them
+first, so the painter's order holds. Triangle lists arrive in SDL's own
+vertex layout and are drawn without copying. Dark mode inverts page pixels
+with word arithmetic that the compiler vectorizes.
 
 Window coordinates remain logical while the bridge queries the real renderer
 framebuffer density. It scales SDL drawing to that framebuffer and reports the
@@ -208,13 +217,15 @@ density to Zig, which rasterizes text, icons, thumbnails, and pages to match.
 | Core | `test:unit` | Exhaustive state transitions, formats, and boundaries |
 | Application | `test:application` | Commands, orchestration, timers, render queue, interface, storage; links no native library |
 | Tooling | `test:tools` | Style-checker acceptance and rejection contracts |
-| Native contracts | `test:native` | Raw input, PDF rendering, text rasterization, screenshots |
-| End to end | `test:integration` | PDF render and note persistence with a dummy display |
+| Native contracts | `test:native` | Raw input, PDF rendering, worker thread, text rasterization, screenshots compared with `tests/golden` |
+| End to end | `test:e2e` | The production application with the real window, worker threads, and files, driven by synthetic events |
+| Smoke run | `test:integration` | The installed binary renders a PDF and persists a note with a dummy display |
 | Release | `check:release` | Optimized safety-enabled compilation |
 
 `zig build ci` is the authoritative local and remote quality gate. The native
 tests write one screenshot per interface surface to `.zig-cache/screenshots`
-for manual review.
+and compare each with its reference image; `-Dupdate-golden` rewrites the
+references after an intended change.
 
 ## Planned extension points
 

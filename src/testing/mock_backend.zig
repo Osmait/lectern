@@ -4,6 +4,11 @@
 //! the clock, the render queue, and storage. Tests inject failures through
 //! `State` flags. Render jobs complete as soon as they are submitted unless a
 //! test turns `auto_complete_renders` off and pumps them by hand.
+//!
+//! Drawing is recorded, not only counted: every filled or stroked rectangle,
+//! every texture draw with its destination and tint, every clip, and every
+//! triangle batch of the current frame can be inspected, and textures
+//! remember the text or icon they were created from.
 
 const std = @import("std");
 const ui = @import("../ui.zig");
@@ -13,6 +18,46 @@ const input = ui.input;
 const layout = ui.layout;
 const theme = ui.theme;
 const frame_module = ui.frame;
+
+pub const DrawnRect = struct {
+    rect: layout.Rect,
+    color: theme.Rgba,
+};
+
+pub const DrawnTexture = struct {
+    serial: u64,
+    rect: layout.Rect,
+    tint: theme.Rgba,
+};
+
+pub const TriangleBatch = struct {
+    triangle_count: usize,
+    first_color: theme.FColor,
+};
+
+pub const TextureKind = enum { text, icon, page };
+
+pub const PrefixedText = struct {
+    draw: DrawnTexture,
+    text: []const u8,
+};
+
+pub const TextureLabel = struct {
+    pub const text_capacity = 96;
+
+    serial: u64,
+    kind: TextureKind,
+    text: [text_capacity]u8 = undefined,
+    text_length: u8 = 0,
+    icon: theme.Icon = .open,
+    color: theme.Rgba = theme.white,
+    size: u8 = 0,
+    strong: bool = false,
+
+    pub fn textSlice(self: *const TextureLabel) []const u8 {
+        return self.text[0..self.text_length];
+    }
+};
 
 pub const State = struct {
     allocator: std.mem.Allocator,
@@ -72,6 +117,16 @@ pub const State = struct {
     render_results: std.ArrayList(Backend.RenderResult) = .empty,
     write_completions: std.ArrayList(storage_module.Completion) = .empty,
 
+    /// Drawing record of the frame in progress; reset by `beginFrame`.
+    fills: std.ArrayList(DrawnRect) = .empty,
+    outlines: std.ArrayList(DrawnRect) = .empty,
+    texture_draws: std.ArrayList(DrawnTexture) = .empty,
+    clips: std.ArrayList(?layout.Rect) = .empty,
+    batches: std.ArrayList(TriangleBatch) = .empty,
+    /// What every texture was created from, for the life of the state.
+    labels: std.ArrayList(TextureLabel) = .empty,
+    next_texture_serial: u64 = 1,
+
     pub fn init(allocator: std.mem.Allocator) State {
         return .{ .allocator = allocator };
     }
@@ -93,7 +148,117 @@ pub const State = struct {
         }
         self.render_results.deinit(self.allocator);
         self.write_completions.deinit(self.allocator);
+        self.fills.deinit(self.allocator);
+        self.outlines.deinit(self.allocator);
+        self.texture_draws.deinit(self.allocator);
+        self.clips.deinit(self.allocator);
+        self.batches.deinit(self.allocator);
+        self.labels.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    fn clearFrameRecord(self: *State) void {
+        self.fills.clearRetainingCapacity();
+        self.outlines.clearRetainingCapacity();
+        self.texture_draws.clearRetainingCapacity();
+        self.clips.clearRetainingCapacity();
+        self.batches.clearRetainingCapacity();
+    }
+
+    fn newTexture(self: *State, label: TextureLabel, width: u32, height: u32) Backend.Texture {
+        var owned = label;
+        owned.serial = self.next_texture_serial;
+        self.next_texture_serial += 1;
+        self.texture_create_count += 1;
+        // Recording is best effort: a failed append only weakens assertions.
+        self.labels.append(self.allocator, owned) catch {};
+        return .{ .state = self, .serial = owned.serial, .width = width, .height = height };
+    }
+
+    fn labelOf(self: *const State, serial: u64) ?*const TextureLabel {
+        for (self.labels.items) |*entry| {
+            if (entry.serial == serial) return entry;
+        }
+        return null;
+    }
+
+    /// Whether a rectangle was filled with exactly this color this frame.
+    pub fn filled(self: *const State, rect: layout.Rect, color: theme.Rgba) bool {
+        for (self.fills.items) |fill| {
+            if (sameRect(fill.rect, rect) and std.meta.eql(fill.color, color)) return true;
+        }
+        return false;
+    }
+
+    /// Whether a rectangle was outlined with exactly this color this frame.
+    pub fn outlined(self: *const State, rect: layout.Rect, color: theme.Rgba) bool {
+        for (self.outlines.items) |outline| {
+            if (sameRect(outline.rect, rect) and std.meta.eql(outline.color, color)) return true;
+        }
+        return false;
+    }
+
+    /// The last draw of a text texture with these contents this frame.
+    pub fn textDraw(self: *const State, text: []const u8) ?DrawnTexture {
+        var found: ?DrawnTexture = null;
+        for (self.texture_draws.items) |draw| {
+            const entry = self.labelOf(draw.serial) orelse continue;
+            if (entry.kind != .text or !std.mem.eql(u8, entry.textSlice(), text)) continue;
+            found = draw;
+        }
+        return found;
+    }
+
+    /// The text of the last drawn text texture starting with `prefix`, with
+    /// its draw; used for titles that the renderer may have shortened.
+    pub fn textDrawPrefixed(self: *const State, prefix: []const u8) ?PrefixedText {
+        var found: ?PrefixedText = null;
+        for (self.texture_draws.items) |draw| {
+            const entry = self.labelOf(draw.serial) orelse continue;
+            if (entry.kind != .text or !std.mem.startsWith(u8, entry.textSlice(), prefix)) continue;
+            found = .{ .draw = draw, .text = entry.textSlice() };
+        }
+        return found;
+    }
+
+    /// The color an icon was rasterized with when it was last drawn this
+    /// frame, or null when it was not drawn.
+    pub fn iconColor(self: *const State, icon: theme.Icon) ?theme.Rgba {
+        var found: ?theme.Rgba = null;
+        for (self.texture_draws.items) |draw| {
+            const entry = self.labelOf(draw.serial) orelse continue;
+            if (entry.kind == .icon and entry.icon == icon) found = entry.color;
+        }
+        return found;
+    }
+
+    /// The last draw of an icon this frame.
+    pub fn iconDraw(self: *const State, icon: theme.Icon) ?DrawnTexture {
+        var found: ?DrawnTexture = null;
+        for (self.texture_draws.items) |draw| {
+            const entry = self.labelOf(draw.serial) orelse continue;
+            if (entry.kind == .icon and entry.icon == icon) found = draw;
+        }
+        return found;
+    }
+
+    /// The last draw of a page texture this frame.
+    pub fn pageDraw(self: *const State) ?DrawnTexture {
+        var found: ?DrawnTexture = null;
+        for (self.texture_draws.items) |draw| {
+            const entry = self.labelOf(draw.serial) orelse continue;
+            if (entry.kind == .page) found = draw;
+        }
+        return found;
+    }
+
+    /// Fills whose rectangle sits entirely inside `bounds`, this frame.
+    pub fn fillsInside(self: *const State, bounds: layout.Rect) usize {
+        var total: usize = 0;
+        for (self.fills.items) |fill| {
+            if (rectInside(fill.rect, bounds)) total += 1;
+        }
+        return total;
     }
 
     pub fn pushInput(self: *State, raw: input.RawInput) !void {
@@ -158,7 +323,7 @@ pub const State = struct {
         try self.render_results.append(self.allocator, .{ .job = job, .texture = texture });
     }
 
-    fn takeInput(self: *State, allocator: std.mem.Allocator) ?input.RawInput {
+    pub fn takeInput(self: *State, allocator: std.mem.Allocator) ?input.RawInput {
         if (self.input_index >= self.inputs.items.len) return null;
         var raw = self.inputs.items[self.input_index];
         self.input_index += 1;
@@ -169,9 +334,23 @@ pub const State = struct {
     }
 };
 
+pub fn sameRect(left: layout.Rect, right: layout.Rect) bool {
+    const tolerance = 0.01;
+    return @abs(left.x - right.x) <= tolerance and @abs(left.y - right.y) <= tolerance and
+        @abs(left.w - right.w) <= tolerance and @abs(left.h - right.h) <= tolerance;
+}
+
+pub fn rectInside(inner: layout.Rect, outer: layout.Rect) bool {
+    const tolerance = 0.01;
+    return inner.x >= outer.x - tolerance and inner.y >= outer.y - tolerance and
+        inner.x + inner.w <= outer.x + outer.w + tolerance and
+        inner.y + inner.h <= outer.y + outer.h + tolerance;
+}
+
 pub const Backend = struct {
     pub const Texture = struct {
         state: *State,
+        serial: u64 = 0,
         width: u32,
         height: u32,
 
@@ -256,6 +435,7 @@ pub const Backend = struct {
         pub fn beginFrame(self: Context, clear_color: theme.Rgba) frame_module.FrameInfo {
             _ = clear_color;
             self.state.frame_count += 1;
+            self.state.clearFrameRecord();
             return .{ .size = self.state.window, .density = self.state.density };
         }
 
@@ -264,20 +444,22 @@ pub const Backend = struct {
         }
 
         pub fn fillRect(self: Context, rect: layout.Rect, color: theme.Rgba) void {
-            _ = rect;
-            _ = color;
             self.state.fill_rect_count += 1;
+            self.state.fills.append(self.state.allocator, .{
+                .rect = rect,
+                .color = color,
+            }) catch {};
         }
 
         pub fn strokeRect(self: Context, rect: layout.Rect, color: theme.Rgba) void {
-            _ = self;
-            _ = rect;
-            _ = color;
+            self.state.outlines.append(self.state.allocator, .{
+                .rect = rect,
+                .color = color,
+            }) catch {};
         }
 
         pub fn setClip(self: Context, rect: ?layout.Rect) void {
-            _ = self;
-            _ = rect;
+            self.state.clips.append(self.state.allocator, rect) catch {};
         }
 
         pub fn drawTexture(
@@ -286,34 +468,39 @@ pub const Backend = struct {
             destination: layout.Rect,
             tint: theme.Rgba,
         ) void {
-            _ = texture;
-            _ = destination;
-            _ = tint;
             self.state.draw_texture_count += 1;
+            self.state.texture_draws.append(self.state.allocator, .{
+                .serial = texture.serial,
+                .rect = destination,
+                .tint = tint,
+            }) catch {};
         }
 
         pub fn drawTriangles(
             self: Context,
             vertices: []const layout.Vec2,
-            colors: []const theme.Rgba,
+            colors: []const theme.FColor,
             indices: []const u32,
         ) void {
             std.debug.assert(vertices.len == colors.len);
             self.state.triangle_batch_count += 1;
             self.state.triangle_count += indices.len / 3;
+            self.state.batches.append(self.state.allocator, .{
+                .triangle_count = indices.len / 3,
+                .first_color = if (colors.len > 0) colors[0] else theme.toFloat(theme.white),
+            }) catch {};
         }
 
         pub fn createText(self: Context, text: [:0]const u8, size: u8, strong: bool) ?TextImage {
             if (self.state.fail_text) return null;
             self.state.text_create_count += 1;
-            self.state.texture_create_count += 1;
             const width = self.measureText(text, size, strong);
+            var label = TextureLabel{ .serial = 0, .kind = .text, .size = size, .strong = strong };
+            const kept = @min(text.len, TextureLabel.text_capacity);
+            @memcpy(label.text[0..kept], text[0..kept]);
+            label.text_length = @intCast(kept);
             return .{
-                .texture = .{
-                    .state = self.state,
-                    .width = @intFromFloat(width),
-                    .height = size + 6,
-                },
+                .texture = self.state.newTexture(label, @intFromFloat(width), size + 6),
                 .width = width,
                 .height = @floatFromInt(size + 6),
             };
@@ -327,11 +514,13 @@ pub const Backend = struct {
         }
 
         pub fn createIcon(self: Context, icon: theme.Icon, color: theme.Rgba) ?Texture {
-            _ = icon;
-            _ = color;
             self.state.icon_create_count += 1;
-            self.state.texture_create_count += 1;
-            return .{ .state = self.state, .width = 40, .height = 40 };
+            return self.state.newTexture(.{
+                .serial = 0,
+                .kind = .icon,
+                .icon = icon,
+                .color = color,
+            }, 40, 40);
         }
     };
 
@@ -396,12 +585,11 @@ pub const Backend = struct {
             self.state.last_render_scale = scale;
             if (self.state.fail_render) return error.PageRenderFailed;
             if (page_index >= self.state.page_count) return error.PageRenderFailed;
-            self.state.texture_create_count += 1;
-            return .{
-                .state = self.state,
-                .width = @intFromFloat(self.state.page_size.width * scale),
-                .height = @intFromFloat(self.state.page_size.height * scale),
-            };
+            return self.state.newTexture(
+                .{ .serial = 0, .kind = .page },
+                @intFromFloat(self.state.page_size.width * scale),
+                @intFromFloat(self.state.page_size.height * scale),
+            );
         }
     };
 
@@ -523,6 +711,40 @@ pub const Backend = struct {
         }
     };
 };
+
+test "the mock records what a frame drew and what textures were made of" {
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = Backend.Context{ .state = &state };
+    _ = context.beginFrame(theme.white);
+    const rect = layout.Rect{ .x = 1, .y = 2, .w = 3, .h = 4 };
+    context.fillRect(rect, theme.rgb(9, 9, 9));
+    context.strokeRect(rect, theme.rgb(8, 8, 8));
+    context.setClip(rect);
+    context.setClip(null);
+    var text = context.createText("Pen", 16, true).?;
+    defer text.texture.deinit();
+    context.drawTexture(text.texture, rect, theme.rgb(7, 7, 7));
+    var icon = context.createIcon(.undo, theme.rgb(6, 6, 6)).?;
+    defer icon.deinit();
+    context.drawTexture(icon, rect, theme.white);
+
+    try std.testing.expect(state.filled(rect, theme.rgb(9, 9, 9)));
+    try std.testing.expect(!state.filled(rect, theme.rgb(1, 9, 9)));
+    try std.testing.expect(state.outlined(rect, theme.rgb(8, 8, 8)));
+    try std.testing.expectEqual(@as(usize, 2), state.clips.items.len);
+    try std.testing.expectEqual(@as(?layout.Rect, null), state.clips.items[1]);
+    try std.testing.expectEqual(theme.rgb(7, 7, 7), state.textDraw("Pen").?.tint);
+    try std.testing.expectEqual(@as(?DrawnTexture, null), state.textDraw("Eraser"));
+    try std.testing.expectEqual(theme.rgb(6, 6, 6), state.iconColor(.undo).?);
+    try std.testing.expectEqual(@as(?theme.Rgba, null), state.iconColor(.alert));
+    try std.testing.expectEqual(@as(usize, 1), state.fillsInside(rect));
+
+    // The record belongs to one frame.
+    _ = context.beginFrame(theme.white);
+    try std.testing.expect(!state.filled(rect, theme.rgb(9, 9, 9)));
+    try std.testing.expectEqual(@as(?DrawnTexture, null), state.textDraw("Pen"));
+}
 
 test "mock state stores files and queues owned input paths" {
     var state = State.init(std.testing.allocator);
