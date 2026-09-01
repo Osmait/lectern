@@ -49,7 +49,15 @@ zig build test:native -Dupdate-golden
 ```
 
 The references were rendered on Arch Linux with Noto Sans, the interface
-font, which the CI image installs as well. The end-to-end tests drive the
+font, which the CI image installs as well. The PDF fixtures embed their own
+fonts, so Poppler draws the same glyphs on every machine; a fixture whose
+fonts are not embedded would render with whatever substitute the machine
+has and never match a reference made elsewhere. To make a fixture from any
+PDF, print it through Cairo, which embeds the fonts it uses:
+
+```bash
+pdftocairo -pdf source.pdf tests/fixtures/name.pdf
+``` The end-to-end tests drive the
 production application through SDL's dummy window with synthetic events;
 they need the native libraries but no display.
 
