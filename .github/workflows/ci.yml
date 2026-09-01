@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Arch Linux is a rolling distribution, so packages are installed from a
+  # dated snapshot of the package archive. Bump the date deliberately, after
+  # confirming the snapshot still ships Zig 0.16.x.
+  ARCH_SNAPSHOT: 2026/08/30
+
+jobs:
+  quality:
+    name: Build, lint, and test
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Pin the package snapshot
+        run: >-
+          echo "Server=https://archive.archlinux.org/repos/${ARCH_SNAPSHOT}/\$repo/os/\$arch"
+          > /etc/pacman.d/mirrorlist
+
+      - name: Install Zig and native libraries
+        run: >-
+          pacman -Syyu --noconfirm --needed
+          zig sdl3 poppler-glib cairo pkgconf
+
+      - name: Show toolchain version
+        run: zig version
+
+      - name: Run the complete local CI contract
+        run: zig build ci --summary all
+
+      - name: Keep interface screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: interface-screenshots
+          path: .zig-cache/screenshots/*.bmp
+          if-no-files-found: ignore

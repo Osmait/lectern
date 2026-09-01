@@ -1,0 +1,41 @@
+{
+  "title": "Choose the final composition",
+  "question": "The visual world is fixed. Choose how the document, navigation, and annotation margin should share the window.",
+  "options": [
+    {
+      "id": "quiet-margin",
+      "label": "Quiet Margin",
+      "kicker": "YOUR PICK",
+      "lineage": "The Scholar's Margin",
+      "thesis": "A conventional top folio and dark annotation margin let the document remain the unquestioned center.",
+      "palette": ["#171A21", "#FAF7F0", "#315BD6", "#E05A47", "#7C8696"],
+      "materials": ["uncoated paper", "linen-dark shell", "graphite strokes"],
+      "viewport": "The document owns most of the window; a quiet top bar handles navigation and a dark contextual margin holds note tools.",
+      "risk": "The familiar layout depends on exceptional spacing and state craft to feel distinctive.",
+      "comp": ".impeccable/mocks/scholar-margin-classic.png"
+    },
+    {
+      "id": "foldout-margin",
+      "label": "Fold-out Margin",
+      "lineage": "The Scholar's Margin",
+      "thesis": "The note margin becomes an extension of the paper, folding out only when annotation is active.",
+      "palette": ["#171A21", "#FAF7F0", "#315BD6", "#E05A47", "#7C8696"],
+      "materials": ["uncoated paper", "linen-dark frame", "continuous folio rule"],
+      "viewport": "The PDF expands almost edge to edge while a light 200px note margin attaches directly to its right edge.",
+      "risk": "The light margin gives note mode less separation from document content.",
+      "comp": ".impeccable/mocks/scholar-margin-foldout.png"
+    },
+    {
+      "id": "reading-spine",
+      "label": "Reading Spine",
+      "lineage": "The Scholar's Margin",
+      "thesis": "Navigation moves to a slim book-like spine, leaving the top folio nearly silent.",
+      "palette": ["#171A21", "#FAF7F0", "#315BD6", "#E05A47", "#7C8696"],
+      "materials": ["uncoated paper", "linen-dark spine", "graphite strokes"],
+      "viewport": "A 60px reading rail frames the document on the left while the contextual annotation margin balances it on the right.",
+      "risk": "Moving familiar page controls from the top may slow first-time users.",
+      "comp": ".impeccable/mocks/scholar-margin-spine.png"
+    }
+  ],
+  "steer": true
+}

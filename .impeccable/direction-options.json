@@ -1,0 +1,148 @@
+{
+  "title": "Choose Book Read's visual world",
+  "question": "Choose the system that should make focused reading and annotation feel unmistakably clear.",
+  "options": [
+    {
+      "id": "assigned",
+      "label": "The Transparent Desk",
+      "kicker": "THE ROLL",
+      "lineage": "architectural tracing overlays and registration drafting",
+      "thesis": "The PDF is the drawing; notes live on a visible, reversible working layer.",
+      "palette": ["#11151C", "#F4F0E8", "#4D76FF", "#FF6B4A", "#98A2B3"],
+      "materials": ["matte graphite", "warm paper", "translucent drafting film", "registration marks"],
+      "viewport": "A full-height paper canvas commands the center while a slim navigation rail and contextual instrument tray frame it without stealing focus.",
+      "risk": "Too many drafting cues could make a calm reader feel like specialist CAD software.",
+      "raised": [
+        {
+          "from": "Signal Bench",
+          "raise": "Active tools receive instrument-grade status feedback and a concise live readout."
+        },
+        {
+          "from": "Labeled Cutaway",
+          "raise": "Unfamiliar controls keep direct labels until their meaning becomes obvious."
+        },
+        {
+          "from": "Box Archive",
+          "raise": "Selected color and width states move decisively forward instead of changing by a few pixels."
+        }
+      ],
+      "comp": ".impeccable/mocks/decision/assigned.png"
+    },
+    {
+      "id": "model-pick",
+      "label": "The Scholar's Margin",
+      "kicker": "IMPECCABLE’S PICK",
+      "lineage": "annotated monographs, proofreader marks, and working marginalia",
+      "thesis": "A calm reading desk where annotation tools behave like a precise modern margin.",
+      "palette": ["#171A21", "#FAF7F0", "#315BD6", "#E05A47", "#7C8696"],
+      "materials": ["uncoated paper", "linen-dark shell", "graphite strokes"],
+      "viewport": "The document owns most of the window; a quiet top bar handles navigation and an expandable margin holds note tools and history.",
+      "risk": "This is the most familiar direction and can feel conservative unless the margin interaction is exceptionally crafted.",
+      "comp": ".impeccable/mocks/decision/model-pick.png"
+    },
+    {
+      "id": "challenger-boarding",
+      "label": "Reading Itinerary",
+      "verdict": "competitive",
+      "lineage": "segmented boarding passes and live gate boards",
+      "thesis": "Every page is a leg in a reading journey, with progress and annotation changes held visibly in place.",
+      "palette": ["#0B0D10", "#FFFFFF", "#E6E8EB", "#6B7178", "#FFD400"],
+      "materials": ["matte status panels", "segmented paper", "tabular rules"],
+      "viewport": "A precise status strip ranks document, page, zoom, and save state while the PDF and detachable annotation segment sit below.",
+      "case": "It matches product clarity through exceptional state signaling, but focused readers identify less strongly with travel infrastructure.",
+      "risk": "The journey metaphor may become louder than the long-form reading task.",
+      "comp": ".impeccable/mocks/decision/challenger-boarding.png",
+      "hero": "https://impeccable.style/worlds/cards/vernacular-ephemera-boarding-pass-and-gate-board-hero.webp",
+      "board": "https://impeccable.style/worlds/cards/vernacular-ephemera-boarding-pass-and-gate-board.webp"
+    },
+    {
+      "id": "challenger-scope",
+      "label": "Signal Bench",
+      "verdict": "declined",
+      "lineage": "CRT oscilloscopes and calibrated signal benches",
+      "thesis": "Reading and ink become channels on one precision instrument.",
+      "palette": ["#050605", "#39FF14", "#3A3F3A", "#FFB000"],
+      "materials": ["anti-reflective glass", "etched graticule", "powder-coated bezel"],
+      "viewport": "The PDF sits inside an instrument bezel with tool controls arranged as calibrated channels.",
+      "case": "The active-state model is excellent, but the scientific hardware identity overwhelms books and sustained reading.",
+      "kept": "Instrument-grade active-state feedback.",
+      "risk": "Long sessions would feel visually intense and genre-specific.",
+      "hero": "https://impeccable.style/worlds/cards/scientific-notation-oscilloscope-signal-bench-hero.webp",
+      "board": "https://impeccable.style/worlds/cards/scientific-notation-oscilloscope-signal-bench.webp"
+    },
+    {
+      "id": "challenger-data",
+      "label": "Data Field",
+      "verdict": "declined",
+      "lineage": "Ryoji Ikeda's black-and-white data fields",
+      "thesis": "Pages and marks become a strict field of indexed information.",
+      "palette": ["#000000", "#FFFFFF"],
+      "materials": ["pixel-crisp bars", "hairline rules", "tabular numerics"],
+      "viewport": "A black-and-white page field is indexed by dense page and mark coordinates.",
+      "case": "The system is rigorous, but it sacrifices reading comfort and gives annotation color no honest role.",
+      "kept": "Ruthless hierarchy and alignment discipline.",
+      "risk": "High visual tension works against prolonged reading.",
+      "hero": "https://impeccable.style/worlds/cards/ikeda-datamatics-hero.webp"
+    },
+    {
+      "id": "challenger-cutaway",
+      "label": "Labeled Cutaway",
+      "verdict": "declined",
+      "lineage": "Busytown cross-section spreads",
+      "thesis": "Every reading control explains itself directly in one continuous labeled scene.",
+      "palette": ["#F7F0DA", "#B44B3A", "#E8B735", "#5F8B55"],
+      "materials": ["gouache flats", "warm outlines", "printed labels"],
+      "viewport": "The reader opens as a labeled cutaway where each tool reveals its purpose beside the page.",
+      "case": "Its discoverability is strong, but the illustrative world conflicts with focused academic reading.",
+      "kept": "Direct labels for unfamiliar tools.",
+      "risk": "The interface risks feeling instructional after the first session.",
+      "hero": "https://impeccable.style/worlds/cards/graphic-worlds-publishing-busytown-cross-section-hero.webp"
+    },
+    {
+      "id": "challenger-boxes",
+      "label": "Box Archive",
+      "verdict": "declined",
+      "lineage": "stacked sneaker boxes and indexed end labels",
+      "thesis": "Documents and tools are selected by pulling a clearly labeled object from an archive wall.",
+      "palette": ["#B9572D", "#17130F", "#F4EEE3", "#4D76FF"],
+      "materials": ["box board", "tissue paper", "printed end labels"],
+      "viewport": "The PDF slides from a document stack while the active tool projects from a labeled tray.",
+      "case": "Selection states are tangible, but the archive metaphor serves a library screen better than the reader itself.",
+      "kept": "Decisive selected states that visibly move forward.",
+      "risk": "Object theater would consume space needed by the document.",
+      "hero": "https://impeccable.style/worlds/cards/textiles-weave-drape-fashion-sneaker-box-stacks-hero.webp"
+    },
+    {
+      "id": "challenger-tension",
+      "label": "Balanced Forces",
+      "verdict": "declined",
+      "lineage": "tensegrity structures and force diagrams",
+      "thesis": "Reading, navigation, and annotation are exposed as one balanced system.",
+      "palette": ["#151515", "#E9E6DF", "#C83232", "#8A8A86"],
+      "materials": ["carbon rods", "red tension cord", "pale concrete"],
+      "viewport": "The document is held by a visible network linking page state to contextual controls.",
+      "case": "The relationships are clear in theory, but the spatial metaphor makes ordinary PDF actions unfamiliar.",
+      "kept": "Every contextual option remains visibly connected to its active tool.",
+      "risk": "Novel navigation would slow experienced readers.",
+      "hero": "https://impeccable.style/worlds/cards/kinetic-sculpture-automata-tensegrity-breathing-column-hero.webp"
+    }
+  ],
+  "reroll": {
+    "registers": ["safer", "bolder"]
+  },
+  "buildPath": {
+    "value": "comp",
+    "toggle": true
+  },
+  "canon": true,
+  "canonCard": {
+    "label": "The category standard",
+    "thesis": "A familiar desktop PDF reader executed with excellent hierarchy and interaction polish.",
+    "palette": ["#111827", "#FFFFFF", "#F3F4F6", "#2563EB"],
+    "materials": ["neutral panels", "standard toolbar", "clean document canvas"],
+    "viewport": "A conventional top toolbar, centered document, and persistent right annotation sidebar.",
+    "risk": "It is immediately usable but intentionally indistinguishable from established PDF readers.",
+    "comp": ".impeccable/mocks/decision/canon.png"
+  },
+  "steer": true
+}

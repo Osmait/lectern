@@ -1,0 +1,7 @@
+.zig-cache/
+zig-out/
+.impeccable/build/
+.impeccable/config.local.json
+# Generated design images from the Impeccable tool; run it locally to regenerate.
+.impeccable/mocks/
+.impeccable/review/
