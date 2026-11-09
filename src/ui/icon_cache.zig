@@ -18,7 +18,7 @@ pub fn IconCache(comptime backend: type) type {
             last_used: u64 = 0,
         };
 
-        entries: [capacity]Entry = [_]Entry{.{}} ** capacity,
+        entries: [capacity]Entry = @splat(.{}),
         tick: u64 = 0,
         create_count: usize = 0,
 

@@ -27,7 +27,7 @@ pub fn PageCache(comptime Texture: type) type {
             last_used: u64,
         };
 
-        entries: [capacity]?Entry = [_]?Entry{null} ** capacity,
+        entries: [capacity]?Entry = @splat(null),
         tick: u64 = 0,
 
         pub fn deinit(self: *Self) void {

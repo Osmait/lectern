@@ -7,6 +7,7 @@ test {
     _ = @import("arguments.zig");
     _ = @import("commands.zig");
     _ = @import("storage.zig");
+    _ = @import("config_files.zig");
     _ = @import("rendering.zig");
     _ = @import("page_cache.zig");
     _ = @import("ui.zig");

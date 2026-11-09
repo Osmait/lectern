@@ -292,7 +292,7 @@ const PanelRow = enum {
     status,
 };
 
-const panel_row_count = std.meta.fields(PanelRow).len;
+const panel_row_count = @typeInfo(PanelRow).@"enum".field_names.len;
 
 const panel_row_heights = std.enums.EnumArray(PanelRow, f32).init(.{
     .title = 44,
@@ -392,8 +392,7 @@ pub const Layout = struct {
     pub fn toolbarHit(self: Layout, point: Vec2, document_open: bool) ?ToolbarButton {
         if (point.y < 0 or point.y >= header_height) return null;
         const row = Vec2{ .x = point.x, .y = toolbar_top + toolbar_button / 2 };
-        inline for (std.meta.fields(ToolbarButton)) |field| {
-            const button: ToolbarButton = @enumFromInt(field.value);
+        inline for (comptime std.enums.values(ToolbarButton)) |button| {
             const enabled = button != .pages or document_open;
             if (enabled and self.toolbar.rectFor(button).contains(row)) return button;
         }
@@ -785,14 +784,14 @@ test "toolbar buttons never overlap and stay inside the header" {
             .navigation_visible = true,
             .annotations_enabled = true,
         });
-        const buttons = std.meta.fields(ToolbarButton);
-        inline for (buttons, 0..) |field, index| {
-            const rect = layout.toolbar.rectFor(@enumFromInt(field.value));
+        const buttons = comptime std.enums.values(ToolbarButton);
+        inline for (buttons, 0..) |button, index| {
+            const rect = layout.toolbar.rectFor(button);
             try std.testing.expect(rect.x >= 0);
             try std.testing.expect(rect.x + rect.w <= width);
             try std.testing.expect(rect.y + rect.h <= header_height);
-            inline for (buttons[index + 1 ..]) |other_field| {
-                const other = layout.toolbar.rectFor(@enumFromInt(other_field.value));
+            inline for (buttons[index + 1 ..]) |other_button| {
+                const other = layout.toolbar.rectFor(other_button);
                 const separated = rect.x + rect.w <= other.x or other.x + other.w <= rect.x;
                 try std.testing.expect(separated);
             }
@@ -807,8 +806,7 @@ test "toolbar hit testing returns every button and nothing between them" {
         .navigation_visible = true,
         .annotations_enabled = false,
     });
-    inline for (std.meta.fields(ToolbarButton)) |field| {
-        const button: ToolbarButton = @enumFromInt(field.value);
+    inline for (comptime std.enums.values(ToolbarButton)) |button| {
         const rect = layout.toolbar.rectFor(button);
         const center = Vec2{ .x = rect.centerX(), .y = 5 };
         try std.testing.expectEqual(button, layout.toolbarHit(center, true).?);

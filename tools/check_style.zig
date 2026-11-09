@@ -55,13 +55,13 @@ test "style checker accepts clean source" {
 }
 
 test "style checker accepts the exact line limit" {
-    const line = "a" ** maximum_line_length;
-    try std.testing.expect(!checkFile("limit.zig", line));
+    const line: [maximum_line_length]u8 = @splat('a');
+    try std.testing.expect(!checkFile("limit.zig", &line));
 }
 
 test "style checker rejects every supported violation" {
-    const long_line = "a" ** (maximum_line_length + 1);
-    try std.testing.expect(checkFile("long.zig", long_line));
+    const long_line: [maximum_line_length + 1]u8 = @splat('a');
+    try std.testing.expect(checkFile("long.zig", &long_line));
     try std.testing.expect(checkFile("tab.zig", "const\tanswer = 42;\n"));
     try std.testing.expect(checkFile("space.zig", "const answer = 42; \n"));
     try std.testing.expect(checkFile("crlf.zig", "const answer = 42;\r\n"));

@@ -4,7 +4,8 @@
 application driven headlessly through a scripted session. It is compiled
 `ReleaseFast` with frame pointers and debug information, so profilers can
 attribute samples to functions. The session opens the given PDF and runs
-these phases, printing the wall time of each:
+these phases, printing the wall time of each; an optional second argument
+repeats the session that many times:
 
 | Phase | What it exercises |
 | --- | --- |
@@ -61,6 +62,32 @@ work the same way. `--tid` gives every thread its own root: the main thread,
 
 Wall times printed by the workload include vertical sync waits: the dummy
 renderer simulates a 60 Hz display by sleeping in `SDL_RenderPresent`.
+
+## Memory checks
+
+Zig allocations are checked by every test, which fails on a leak, and by the
+`Debug` binary, whose allocator reports leaks when the process exits. The C
+side, meaning the bridge, SDL, Cairo, Poppler, and GLib, is outside that
+allocator, so it is checked with LeakSanitizer preloaded into a headless run:
+
+```bash
+zig build
+LSAN_OPTIONS=fast_unwind_on_malloc=0 LD_PRELOAD=/usr/lib/liblsan.so \
+    SDL_VIDEODRIVER=dummy zig-out/bin/lectern --smoke-test tests/fixtures/smoke.pdf
+```
+
+The same preload works on the native and end-to-end test binaries under
+`.zig-cache/o`. A clean run prints nothing; the bridge releases Cairo's
+static font caches at shutdown so that they do not show up as leaks.
+
+Growth over time is measured with the rounds mode of the profiling session,
+which repeats the whole scripted session and prints the resident memory
+after each repetition. The number settles after the caches fill; a value
+that keeps climbing round after round is a leak:
+
+```bash
+SDL_VIDEODRIVER=dummy zig-out/bin/lectern-profile book.pdf 8
+```
 
 ## Baseline
 

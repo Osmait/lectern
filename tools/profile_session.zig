@@ -9,9 +9,7 @@
 const std = @import("std");
 const app = @import("app");
 
-const c = @cImport({
-    @cInclude("SDL3/SDL.h");
-});
+const c = @import("c");
 
 /// SDL ends each poll cycle with a sentinel; a few rounds drain what was
 /// queued before the call.
@@ -110,12 +108,32 @@ fn now(io: std.Io) std.Io.Timestamp {
     return std.Io.Clock.awake.now(io);
 }
 
+/// Resident memory of this process in megabytes, read from procfs; the
+/// rounds mode prints it after every session so a leak shows as growth.
+fn residentMegabytes(io: std.Io) !f64 {
+    // procfs reports a size of zero, so the file is read into a fixed buffer
+    // rather than sized up front.
+    const file = try std.Io.Dir.cwd().openFile(io, "/proc/self/statm", .{});
+    defer file.close(io);
+    var buffer: [256]u8 = undefined;
+    const length = try file.readPositionalAll(io, &buffer, 0);
+    var fields = std.mem.tokenizeScalar(u8, buffer[0..length], ' ');
+    _ = fields.next() orelse return error.UnexpectedStatm;
+    const resident_text = fields.next() orelse return error.UnexpectedStatm;
+    const resident_pages = try std.fmt.parseInt(u64, resident_text, 10);
+    return @as(f64, @floatFromInt(resident_pages)) * 4096.0 / (1024.0 * 1024.0);
+}
+
 pub fn main(init: std.process.Init) !void {
     const arguments = try init.minimal.args.toSlice(init.arena.allocator());
-    if (arguments.len != 2) {
-        std.log.err("usage: lectern-profile PDF", .{});
+    if (arguments.len < 2 or arguments.len > 3) {
+        std.log.err("usage: lectern-profile PDF [ROUNDS]", .{});
         return error.InvalidArguments;
     }
+    const rounds: usize = if (arguments.len == 3)
+        try std.fmt.parseInt(usize, arguments[2], 10)
+    else
+        1;
 
     var context = try app.Context.init();
     defer context.deinit();
@@ -138,166 +156,184 @@ pub fn main(init: std.process.Init) !void {
     var phases: std.ArrayList(Phase) = .empty;
     defer phases.deinit(init.gpa);
     const io = init.io;
-
-    var started = now(io);
-    try application.openPdf(arguments[1]);
-    driver.settle();
-    try phases.append(init.gpa, .{
-        .name = "open document",
-        .iterations = 1,
-        .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
-    });
-    const page_count = application.reader.pageCount();
-
-    // Page turns: every render lands before the next turn, like a reader
-    // who looks at each page.
-    started = now(io);
-    const turns = 3 * page_count;
-    var turn: usize = 0;
-    while (turn < turns) : (turn += 1) {
-        const forward = (turn / page_count) % 2 == 0;
-        const scancode: c.SDL_Scancode = if (forward) c.SDL_SCANCODE_RIGHT else c.SDL_SCANCODE_LEFT;
-        driver.pushKey(scancode, c.SDLK_UNKNOWN);
-        driver.pump();
-        driver.settle();
-    }
-    try phases.append(init.gpa, .{
-        .name = "page turns",
-        .iterations = turns,
-        .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
-    });
-
-    // Zoom bursts: fifteen steps in, the deferred render, fifteen out.
-    started = now(io);
-    var burst: usize = 0;
-    while (burst < 4) : (burst += 1) {
-        var step: usize = 0;
-        while (step < 15) : (step += 1) {
-            const keycode: c.SDL_Keycode = if (burst % 2 == 0) c.SDLK_PLUS else c.SDLK_MINUS;
-            driver.pushKey(c.SDL_SCANCODE_UNKNOWN, keycode);
-            driver.pump();
-        }
-        driver.settleTimers();
-    }
-    try phases.append(init.gpa, .{
-        .name = "zoom bursts",
-        .iterations = 4,
-        .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
-    });
-
-    // Pen strokes: long drags with a frame per motion event, then the save.
-    driver.pushKey(c.SDL_SCANCODE_UNKNOWN, c.SDLK_P);
-    driver.pump();
-    started = now(io);
-    const strokes = 24;
-    const points_per_stroke = 200;
-    var stroke: usize = 0;
-    while (stroke < strokes) : (stroke += 1) {
-        const rect = driver.pageRect();
-        const y = rect.y + rect.h * (0.1 + 0.8 * @as(f32, @floatFromInt(stroke)) /
-            @as(f32, @floatFromInt(strokes)));
-        driver.pushMouse(.down, rect.x + rect.w * 0.1, y);
-        driver.pump();
-        // A mouse reports several positions per frame; the loop drains
-        // them all before it repaints, so they are queued in small bursts.
-        var point: usize = 1;
-        while (point < points_per_stroke) : (point += 1) {
-            const progress = @as(f32, @floatFromInt(point)) /
-                @as(f32, @floatFromInt(points_per_stroke));
-            const x = rect.x + rect.w * (0.1 + 0.8 * progress);
-            driver.pushMouse(.motion, x, y + 6 * @sin(progress * 40));
-            if (point % motions_per_frame == 0) driver.pump();
-        }
-        driver.pushMouse(.up, rect.x + rect.w * 0.9, y);
-        driver.pump();
-    }
-    application.flushState();
-    try phases.append(init.gpa, .{
-        .name = "pen strokes",
-        .iterations = strokes * points_per_stroke,
-        .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
-    });
-
-    // Thumbnail scrolling: every wheel step repaints the rail and renders
-    // the pages that came into view.
-    driver.pushKey(c.SDL_SCANCODE_UNKNOWN, c.SDLK_N);
-    driver.pump();
-    started = now(io);
-    const scrolls = 60;
-    var scroll: usize = 0;
-    while (scroll < scrolls) : (scroll += 1) {
-        const direction: f32 = if (scroll < scrolls / 2) -1 else 1;
-        driver.pushWheel(40, 400, direction);
-        driver.pump();
-        driver.settle();
-    }
-    try phases.append(init.gpa, .{
-        .name = "thumbnail scroll",
-        .iterations = scrolls,
-        .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
-    });
-
-    // Theme toggles re-render the page and every thumbnail.
-    started = now(io);
-    var toggle: usize = 0;
-    while (toggle < 6) : (toggle += 1) {
-        driver.pushKey(c.SDL_SCANCODE_UNKNOWN, c.SDLK_D);
-        driver.pump();
-        driver.settle();
-    }
-    try phases.append(init.gpa, .{
-        .name = "theme toggles",
-        .iterations = 6,
-        .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
-    });
-
-    // Resizes: a drag that grows and shrinks the window, then the settle.
-    started = now(io);
-    var resize: usize = 0;
-    while (resize < 20) : (resize += 1) {
-        const height: u32 = 700 + 20 * @as(u32, @intCast(resize % 10));
-        _ = context.setWindowSize(1100 + 10 * @as(u32, @intCast(resize)), height);
-        driver.pump();
-    }
-    driver.settleTimers();
-    try phases.append(init.gpa, .{
-        .name = "resizes",
-        .iterations = 20,
-        .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
-    });
-
-    // Hover sweep across the toolbar: repaints only when the control changes.
-    started = now(io);
-    const sweeps = 400;
-    var sweep: usize = 0;
-    while (sweep < sweeps) : (sweep += 1) {
-        const x: f32 = @floatFromInt(100 + (sweep * 7) % 1000);
-        driver.pushMouse(.hover, x, 30);
-        driver.pump();
-    }
-    try phases.append(init.gpa, .{
-        .name = "hover sweep",
-        .iterations = sweeps,
-        .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
-    });
-
     var stdout_buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &stdout_buffer);
     const out = &stdout.interface;
-    try out.print("{s:<18} {s:>10} {s:>12} {s:>12}\n", .{
-        "phase",
-        "iterations",
-        "total ms",
-        "per item ms",
-    });
-    for (phases.items) |phase| {
-        const total_ms = @as(f64, @floatFromInt(phase.nanoseconds)) / 1e6;
-        try out.print("{s:<18} {d:>10} {d:>12.1} {d:>12.3}\n", .{
-            phase.name,
-            phase.iterations,
-            total_ms,
-            total_ms / @as(f64, @floatFromInt(phase.iterations)),
+
+    var round: usize = 0;
+    while (round < rounds) : (round += 1) {
+        phases.clearRetainingCapacity();
+        var started = now(io);
+        try application.openPdf(arguments[1]);
+        driver.settle();
+        try phases.append(init.gpa, .{
+            .name = "open document",
+            .iterations = 1,
+            .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
         });
+        const page_count = application.reader.pageCount();
+
+        // Page turns: every render lands before the next turn, like a reader
+        // who looks at each page.
+        started = now(io);
+        const turns = 3 * page_count;
+        var turn: usize = 0;
+        while (turn < turns) : (turn += 1) {
+            const forward = (turn / page_count) % 2 == 0;
+            const scancode: c.SDL_Scancode = if (forward)
+                c.SDL_SCANCODE_RIGHT
+            else
+                c.SDL_SCANCODE_LEFT;
+            driver.pushKey(scancode, c.SDLK_UNKNOWN);
+            driver.pump();
+            driver.settle();
+        }
+        try phases.append(init.gpa, .{
+            .name = "page turns",
+            .iterations = turns,
+            .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
+        });
+
+        // Zoom bursts: fifteen steps in, the deferred render, fifteen out.
+        started = now(io);
+        var burst: usize = 0;
+        while (burst < 4) : (burst += 1) {
+            var step: usize = 0;
+            while (step < 15) : (step += 1) {
+                const keycode: c.SDL_Keycode = if (burst % 2 == 0) c.SDLK_PLUS else c.SDLK_MINUS;
+                driver.pushKey(c.SDL_SCANCODE_UNKNOWN, keycode);
+                driver.pump();
+            }
+            driver.settleTimers();
+        }
+        try phases.append(init.gpa, .{
+            .name = "zoom bursts",
+            .iterations = 4,
+            .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
+        });
+
+        // Pen strokes: long drags with a frame per motion event, then the save.
+        driver.pushKey(c.SDL_SCANCODE_UNKNOWN, c.SDLK_P);
+        driver.pump();
+        started = now(io);
+        const strokes = 24;
+        const points_per_stroke = 200;
+        var stroke: usize = 0;
+        while (stroke < strokes) : (stroke += 1) {
+            const rect = driver.pageRect();
+            const y = rect.y + rect.h * (0.1 + 0.8 * @as(f32, @floatFromInt(stroke)) /
+                @as(f32, @floatFromInt(strokes)));
+            driver.pushMouse(.down, rect.x + rect.w * 0.1, y);
+            driver.pump();
+            // A mouse reports several positions per frame; the loop drains
+            // them all before it repaints, so they are queued in small bursts.
+            var point: usize = 1;
+            while (point < points_per_stroke) : (point += 1) {
+                const progress = @as(f32, @floatFromInt(point)) /
+                    @as(f32, @floatFromInt(points_per_stroke));
+                const x = rect.x + rect.w * (0.1 + 0.8 * progress);
+                driver.pushMouse(.motion, x, y + 6 * @sin(progress * 40));
+                if (point % motions_per_frame == 0) driver.pump();
+            }
+            driver.pushMouse(.up, rect.x + rect.w * 0.9, y);
+            driver.pump();
+        }
+        application.flushState();
+        try phases.append(init.gpa, .{
+            .name = "pen strokes",
+            .iterations = strokes * points_per_stroke,
+            .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
+        });
+
+        // Thumbnail scrolling: every wheel step repaints the rail and renders
+        // the pages that came into view.
+        driver.pushKey(c.SDL_SCANCODE_UNKNOWN, c.SDLK_N);
+        driver.pump();
+        started = now(io);
+        const scrolls = 60;
+        var scroll: usize = 0;
+        while (scroll < scrolls) : (scroll += 1) {
+            const direction: f32 = if (scroll < scrolls / 2) -1 else 1;
+            driver.pushWheel(40, 400, direction);
+            driver.pump();
+            driver.settle();
+        }
+        try phases.append(init.gpa, .{
+            .name = "thumbnail scroll",
+            .iterations = scrolls,
+            .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
+        });
+
+        // Theme toggles re-render the page and every thumbnail.
+        started = now(io);
+        var toggle: usize = 0;
+        while (toggle < 6) : (toggle += 1) {
+            driver.pushKey(c.SDL_SCANCODE_UNKNOWN, c.SDLK_D);
+            driver.pump();
+            driver.settle();
+        }
+        try phases.append(init.gpa, .{
+            .name = "theme toggles",
+            .iterations = 6,
+            .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
+        });
+
+        // Resizes: a drag that grows and shrinks the window, then the settle.
+        started = now(io);
+        var resize: usize = 0;
+        while (resize < 20) : (resize += 1) {
+            const height: u32 = 700 + 20 * @as(u32, @intCast(resize % 10));
+            _ = context.setWindowSize(1100 + 10 * @as(u32, @intCast(resize)), height);
+            driver.pump();
+        }
+        driver.settleTimers();
+        try phases.append(init.gpa, .{
+            .name = "resizes",
+            .iterations = 20,
+            .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
+        });
+
+        // Hover sweep across the toolbar: repaints only when the control changes.
+        started = now(io);
+        const sweeps = 400;
+        var sweep: usize = 0;
+        while (sweep < sweeps) : (sweep += 1) {
+            const x: f32 = @floatFromInt(100 + (sweep * 7) % 1000);
+            driver.pushMouse(.hover, x, 30);
+            driver.pump();
+        }
+        try phases.append(init.gpa, .{
+            .name = "hover sweep",
+            .iterations = sweeps,
+            .nanoseconds = started.durationTo(now(io)).toNanoseconds(),
+        });
+
+        if (round == 0) {
+            try out.print("{s:<18} {s:>10} {s:>12} {s:>12}\n", .{
+                "phase",
+                "iterations",
+                "total ms",
+                "per item ms",
+            });
+            for (phases.items) |phase| {
+                const total_ms = @as(f64, @floatFromInt(phase.nanoseconds)) / 1e6;
+                try out.print("{s:<18} {d:>10} {d:>12.1} {d:>12.3}\n", .{
+                    phase.name,
+                    phase.iterations,
+                    total_ms,
+                    total_ms / @as(f64, @floatFromInt(phase.iterations)),
+                });
+            }
+        }
+        if (rounds > 1) {
+            // Finished renders and queued writes are collected before measuring.
+            driver.settle();
+            application.flushState();
+            try out.print("round {d:>3}: resident {d:>7.1} MB\n", .{
+                round + 1,
+                try residentMegabytes(io),
+            });
+        }
+        try out.flush();
     }
-    try out.flush();
 }

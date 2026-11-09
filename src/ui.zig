@@ -6,6 +6,7 @@
 
 pub const layout = @import("ui/layout.zig");
 pub const theme = @import("ui/theme.zig");
+pub const config = @import("ui/config.zig");
 pub const input = @import("ui/input.zig");
 pub const geometry = @import("ui/geometry.zig");
 pub const frame = @import("ui/frame.zig");
@@ -21,6 +22,7 @@ pub const Renderer = renderer.Renderer;
 test {
     _ = layout;
     _ = theme;
+    _ = config;
     _ = input;
     _ = geometry;
     _ = frame;

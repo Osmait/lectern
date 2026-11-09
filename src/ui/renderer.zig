@@ -20,6 +20,7 @@ const Layout = layout_module.Layout;
 const Rect = layout_module.Rect;
 const Vec2 = layout_module.Vec2;
 const Palette = theme_module.Palette;
+const Look = theme_module.Look;
 const Rgba = theme_module.Rgba;
 const Icon = theme_module.Icon;
 const Frame = frame_module.Frame;
@@ -58,6 +59,7 @@ pub fn Renderer(comptime backend: type) type {
             page_index: usize = 0,
             revision: u64 = 0,
             dark_mode: bool = false,
+            look_revision: u64 = 0,
             page_rect: Rect = Rect.empty,
             valid: bool = false,
             rebuild_count: usize = 0,
@@ -67,6 +69,7 @@ pub fn Renderer(comptime backend: type) type {
                     self.page_index == frame.page_index and
                     self.revision == frame.strokes_revision and
                     self.dark_mode == frame.dark_mode and
+                    self.look_revision == frame.look_revision and
                     std.meta.eql(self.page_rect, page_rect);
             }
         };
@@ -75,6 +78,7 @@ pub fn Renderer(comptime backend: type) type {
             mesh: geometry.Mesh = .{},
             rects: [annotations.Color.swatches.len]Rect = undefined,
             dark_mode: bool = false,
+            look_revision: u64 = 0,
             selected: annotations.Color = .blue,
             hovered: ?annotations.Color = null,
             valid: bool = false,
@@ -88,6 +92,7 @@ pub fn Renderer(comptime backend: type) type {
             page_index: usize = 0,
             page_rect: Rect = Rect.empty,
             dark_mode: bool = false,
+            look_revision: u64 = 0,
             color: annotations.Color = .blue,
             pen_size: annotations.PenSize = .medium,
             first_point: annotations.Point = .{ .x = -1, .y = -1 },
@@ -108,8 +113,12 @@ pub fn Renderer(comptime backend: type) type {
         /// selection, the hover, the theme, or their positions change.
         swatches: SwatchGeometry = .{},
         window_points: std.ArrayList(Vec2) = .empty,
+        /// Scratch geometry of one rounded shape, drawn as soon as it is
+        /// built so the painter's order holds.
+        shape: geometry.Mesh = .{},
         title_cache: TitleCache = .{},
         density: f32 = 1,
+        look: Look = Look.classic(true),
         palette: Palette = Palette.forMode(true),
 
         pub fn init(allocator: std.mem.Allocator) Self {
@@ -127,7 +136,15 @@ pub fn Renderer(comptime backend: type) type {
             self.active.deinit(self.allocator);
             self.swatches.mesh.deinit(self.allocator);
             self.window_points.deinit(self.allocator);
+            self.shape.deinit(self.allocator);
             self.* = undefined;
+        }
+
+        /// Forgets every rasterized text and measured title. The application
+        /// calls it after it changed the font of the backend.
+        pub fn fontChanged(self: *Self) void {
+            self.text_cache.clear();
+            self.title_cache = .{};
         }
 
         pub fn draw(
@@ -138,7 +155,8 @@ pub fn Renderer(comptime backend: type) type {
             page_texture: ?backend.Texture,
         ) Report {
             self.density = frame.density;
-            self.palette = Palette.forMode(frame.dark_mode);
+            self.look = if (frame.look) |look| look.* else Look.classic(frame.dark_mode);
+            self.palette = self.look.palette;
             var report = Report{};
 
             self.drawHeader(context, frame, layout);
@@ -191,7 +209,7 @@ pub fn Renderer(comptime backend: type) type {
                 );
             }
 
-            if (hover.isToolbar(.open)) context.fillRect(toolbar.open, palette.hover);
+            if (hover.isToolbar(.open)) self.fillShape(context, toolbar.open, palette.hover);
             self.drawIcon(
                 context,
                 .open,
@@ -247,7 +265,9 @@ pub fn Renderer(comptime backend: type) type {
             );
             self.drawButton(context, toolbar.zoom_out, .minus, false, hover.isToolbar(.zoom_out));
             self.drawButton(context, toolbar.zoom_in, .plus, false, hover.isToolbar(.zoom_in));
-            if (hover.isToolbar(.zoom_reset)) context.fillRect(toolbar.zoom_reset, palette.hover);
+            if (hover.isToolbar(.zoom_reset)) {
+                self.fillShape(context, toolbar.zoom_reset, palette.hover);
+            }
             var zoom_label: [16]u8 = undefined;
             const zoom_text = std.fmt.bufPrint(&zoom_label, "{d}%", .{frame.zoom_percent}) catch "";
             self.drawCenteredText(context, toolbar.zoom_reset, zoom_text, 14, palette.header_text);
@@ -295,6 +315,7 @@ pub fn Renderer(comptime backend: type) type {
                 .page_index = frame.page_index,
                 .page_rect = page_rect,
                 .dark_mode = frame.dark_mode,
+                .look_revision = frame.look_revision,
                 .color = frame.color,
                 .pen_size = frame.pen_size,
                 .first_point = points[0],
@@ -303,8 +324,8 @@ pub fn Renderer(comptime backend: type) type {
                 points.len >= self.active.pointCount();
             if (!continues) {
                 self.active.reset(
-                    theme_module.penWidth(frame.pen_size),
-                    theme_module.inkColor(frame.color, frame.dark_mode),
+                    self.look.pens.width(frame.pen_size),
+                    self.look.inks.color(frame.color, frame.dark_mode),
                 );
                 self.active_key = key;
             }
@@ -335,14 +356,15 @@ pub fn Renderer(comptime backend: type) type {
                         &cache.mesh,
                         page_rect,
                         stroke.points,
-                        theme_module.inkColor(stroke.color, frame.dark_mode),
-                        theme_module.penWidth(stroke.pen_size),
+                        self.look.inks.color(stroke.color, frame.dark_mode),
+                        self.look.pens.width(stroke.pen_size),
                     ) catch return;
                 }
                 cache.document_identity = frame.document_identity;
                 cache.page_index = frame.page_index;
                 cache.revision = frame.strokes_revision;
                 cache.dark_mode = frame.dark_mode;
+                cache.look_revision = frame.look_revision;
                 cache.page_rect = page_rect;
                 cache.valid = true;
                 cache.rebuild_count += 1;
@@ -455,7 +477,7 @@ pub fn Renderer(comptime backend: type) type {
             var index = visible.first;
             while (index < visible.end) : (index += 1) {
                 const slot = layout.thumbnailSlot(index, frame.thumbnail_scroll);
-                if (frame.hover.isThumbnail(index)) context.fillRect(slot, palette.hover);
+                if (frame.hover.isThumbnail(index)) self.fillShape(context, slot, palette.hover);
 
                 const lookup = self.thumbnails.get(index);
                 if (lookup.missing) report.missing_thumbnails = true;
@@ -515,7 +537,7 @@ pub fn Renderer(comptime backend: type) type {
                 layout_module.scrollbar_width;
             const x = layout.navigation_width - layout_module.scrollbar_right_margin - width;
             if (active) {
-                context.fillRect(.{
+                self.fillPill(context, .{
                     .x = x,
                     .y = bar.track.y,
                     .w = width,
@@ -528,7 +550,8 @@ pub fn Renderer(comptime backend: type) type {
                 palette.text
             else
                 palette.muted;
-            context.fillRect(.{ .x = x, .y = bar.thumb.y, .w = width, .h = bar.thumb.h }, color);
+            const thumb = Rect{ .x = x, .y = bar.thumb.y, .w = width, .h = bar.thumb.h };
+            self.fillPill(context, thumb, color);
         }
 
         fn drawPanel(
@@ -556,7 +579,7 @@ pub fn Renderer(comptime backend: type) type {
                 true,
                 palette.text,
             );
-            if (hover.isPanel(.close)) context.fillRect(panel.close, palette.hover);
+            if (hover.isPanel(.close)) self.fillShape(context, panel.close, palette.hover);
             self.drawIcon(
                 context,
                 .close,
@@ -670,12 +693,25 @@ pub fn Renderer(comptime backend: type) type {
             hovered: bool,
         ) void {
             const palette = self.palette;
-            if (hovered) context.fillRect(rect, palette.hover);
-            if (selected) {
-                context.fillRect(
-                    .{ .x = rect.x, .y = rect.y + rect.h - 2, .w = rect.w, .h = 2 },
-                    palette.accent,
-                );
+            if (self.isRounded()) {
+                // A toggled control is a raised chip framed by the accent,
+                // the way the desktop's panels mark a selection.
+                if (selected) {
+                    self.outlineShape(
+                        context,
+                        rect,
+                        if (hovered) palette.hover else palette.surface,
+                        self.selectionBorder(),
+                    );
+                } else if (hovered) self.fillShape(context, rect, palette.hover);
+            } else {
+                if (hovered) context.fillRect(rect, palette.hover);
+                if (selected) {
+                    context.fillRect(
+                        .{ .x = rect.x, .y = rect.y + rect.h - 2, .w = rect.w, .h = 2 },
+                        palette.accent,
+                    );
+                }
             }
             self.drawIcon(
                 context,
@@ -700,7 +736,27 @@ pub fn Renderer(comptime backend: type) type {
         fn drawPanelTab(self: *Self, context: backend.Context, tab: Tab) void {
             const palette = self.palette;
             const rect = tab.rect;
-            if (tab.hovered) context.fillRect(rect, palette.hover);
+            const round = self.isRounded();
+            if (round) {
+                // The chip hugs the label, which sits above the row's rule,
+                // and follows an icon that leans out of the tab, so two
+                // neighboring chips keep a gap between them.
+                const lean = @min(tab.icon_shift_x, 0);
+                const chip = Rect{
+                    .x = rect.x + lean,
+                    .y = rect.y,
+                    .w = rect.w - lean - layout_module.panel_tab_gap,
+                    .h = rect.h + tab.content_shift_y * 2,
+                };
+                if (tab.selected) {
+                    self.outlineShape(
+                        context,
+                        chip,
+                        if (tab.hovered) palette.hover else palette.surface,
+                        self.selectionBorder(),
+                    );
+                } else if (tab.hovered) self.fillShape(context, chip, palette.hover);
+            } else if (tab.hovered) context.fillRect(rect, palette.hover);
             const color = if (tab.selected) palette.accent else palette.text;
             self.drawIcon(
                 context,
@@ -718,7 +774,7 @@ pub fn Renderer(comptime backend: type) type {
                 tab.selected,
                 color,
             );
-            if (tab.selected) {
+            if (tab.selected and !round) {
                 context.fillRect(.{
                     .x = rect.x,
                     .y = rect.y + rect.h - 2,
@@ -738,7 +794,7 @@ pub fn Renderer(comptime backend: type) type {
 
         fn drawActionRow(self: *Self, context: backend.Context, row: Row) void {
             const rect = row.rect;
-            if (row.hovered) context.fillRect(rect, self.palette.hover);
+            if (row.hovered) self.fillShape(context, rect, self.palette.hover);
             self.drawIcon(context, row.icon, rect.x + 18, rect.centerY(), row.foreground);
             const text_y = rect.centerY() - 11;
             self.drawText(context, rect.x + 40, text_y, row.label, 15, true, row.foreground);
@@ -758,6 +814,7 @@ pub fn Renderer(comptime backend: type) type {
             }
             const cache = &self.swatches;
             const fresh = cache.valid and cache.dark_mode == frame.dark_mode and
+                cache.look_revision == frame.look_revision and
                 cache.selected == frame.color and cache.hovered == hovered and
                 std.meta.eql(cache.rects, panel.colors);
             if (!fresh) {
@@ -766,13 +823,14 @@ pub fn Renderer(comptime backend: type) type {
                 for (panel.colors, annotations.Color.swatches) |rect, color| {
                     self.appendSwatch(
                         .{ .x = rect.centerX(), .y = rect.centerY() },
-                        theme_module.inkColor(color, frame.dark_mode),
+                        self.look.inks.color(color, frame.dark_mode),
                         frame.color == color,
                         hovered == color,
                     ) catch return;
                 }
                 cache.rects = panel.colors;
                 cache.dark_mode = frame.dark_mode;
+                cache.look_revision = frame.look_revision;
                 cache.selected = frame.color;
                 cache.hovered = hovered;
                 cache.valid = true;
@@ -824,14 +882,72 @@ pub fn Renderer(comptime backend: type) type {
             hovered: bool,
         ) void {
             const palette = self.palette;
-            context.fillRect(rect, if (hovered) palette.hover else palette.surface);
-            context.strokeRect(rect, if (selected) palette.accent else palette.border);
+            const fill = if (hovered) palette.hover else palette.surface;
+            const line = if (selected) palette.accent else palette.border;
+            if (self.isRounded()) {
+                self.outlineShape(context, rect, fill, line);
+            } else {
+                context.fillRect(rect, fill);
+                context.strokeRect(rect, line);
+            }
             context.fillRect(.{
                 .x = rect.x + 14,
                 .y = rect.centerY() - line_width / 2,
                 .w = rect.w - 28,
                 .h = line_width,
             }, palette.text);
+        }
+
+        fn isRounded(self: *const Self) bool {
+            return self.look.style.radius > 0;
+        }
+
+        /// The frame of a selected chip: the accent, stepped toward the
+        /// panel so it marks without shouting.
+        fn selectionBorder(self: *const Self) Rgba {
+            return theme_module.mix(self.palette.accent, self.palette.panel, 0.3);
+        }
+
+        /// Fills a control's shape: a plain rectangle in the square look,
+        /// and one with the look's corner radius otherwise.
+        fn fillShape(self: *Self, context: backend.Context, rect: Rect, color: Rgba) void {
+            if (!self.isRounded()) return context.fillRect(rect, color);
+            self.fillRounded(context, rect, self.look.style.radius, color);
+        }
+
+        /// Like `fillShape`, but fully round at the ends: scrollbars.
+        fn fillPill(self: *Self, context: backend.Context, rect: Rect, color: Rgba) void {
+            if (!self.isRounded()) return context.fillRect(rect, color);
+            self.fillRounded(context, rect, @min(rect.w, rect.h) / 2, color);
+        }
+
+        /// A filled shape with a one-pixel frame, both rounded.
+        fn outlineShape(
+            self: *Self,
+            context: backend.Context,
+            rect: Rect,
+            fill: Rgba,
+            line: Rgba,
+        ) void {
+            const radius = self.look.style.radius;
+            self.fillRounded(context, rect, radius, line);
+            self.fillRounded(context, rect.inset(1), @max(radius - 1, 0), fill);
+        }
+
+        fn fillRounded(
+            self: *Self,
+            context: backend.Context,
+            rect: Rect,
+            radius: f32,
+            color: Rgba,
+        ) void {
+            self.shape.clear();
+            geometry.appendRoundedRect(&self.shape, self.allocator, rect, radius, color) catch {
+                // Out of memory for a few vertices: the square shape still
+                // shows the state.
+                return context.fillRect(rect, color);
+            };
+            self.drawMesh(context, self.shape);
         }
 
         fn drawIcon(
@@ -987,9 +1103,13 @@ fn testFrame(options: struct {
     title: []const u8 = "Research Methods.pdf",
     pen_size: annotations.PenSize = .medium,
     scrollbar_dragging: bool = false,
+    look: ?*const Look = null,
+    look_revision: u64 = 0,
 }) Frame {
     return .{
         .dark_mode = options.dark_mode,
+        .look = options.look,
+        .look_revision = options.look_revision,
         .document_open = options.document_open,
         .document_identity = 1,
         .page_index = options.page_index,
@@ -1178,7 +1298,8 @@ test "titles are truncated on codepoint boundaries using measured widths" {
     const short = renderer.truncatedTitle(context, "book.pdf", 1000, 15);
     try std.testing.expectEqualStrings("book.pdf", short);
 
-    const long = "reading-" ++ "ñ" ** 36 ++ ".pdf";
+    const long = "reading-" ++ ("ññññññ" ++ "ññññññ" ++ "ññññññ") ++
+        ("ññññññ" ++ "ññññññ" ++ "ññññññ") ++ ".pdf";
     const truncated = renderer.truncatedTitle(context, long, 120, 15);
     try std.testing.expect(truncated.len < long.len);
     try std.testing.expect(std.mem.endsWith(u8, truncated, "..."));
@@ -1672,4 +1793,173 @@ test "the scrollbar thumb widens when hovered and turns accent while dragged" {
     }), layout, null);
     try std.testing.expect(state.filled(wide, palette.accent));
     try std.testing.expect(state.filled(track, palette.hover));
+}
+
+fn batchColored(state: *const mock.State, color: Rgba) bool {
+    for (state.batches.items) |batch| {
+        if (std.meta.eql(batch.first_color, theme_module.toFloat(color))) return true;
+    }
+    return false;
+}
+
+test "a look gives the frame its colors instead of the reading mode" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var renderer = TestRenderer.init(std.testing.allocator);
+    defer renderer.deinit();
+    const layout = Layout.compute(state.window, annotated_layout_options);
+    var look = Look.classic(false);
+    look.palette.panel = theme_module.rgb(1, 2, 3);
+    look.palette.hover = theme_module.rgb(4, 5, 6);
+    look.palette.accent = theme_module.rgb(7, 8, 9);
+
+    _ = context.beginFrame(look.palette.background);
+    _ = renderer.draw(context, testFrame(.{
+        .tool = .pen,
+        .dark_mode = true,
+        .look = &look,
+        .hover = .{ .toolbar = .next },
+    }), layout, null);
+    try std.testing.expect(state.filled(layout.railRect().?, look.palette.panel));
+    try std.testing.expect(state.filled(layout.panel.?.bounds, look.palette.panel));
+    // The square look keeps its plain rectangles and accent underlines.
+    try std.testing.expect(state.filled(layout.toolbar.next, look.palette.hover));
+    try std.testing.expect(state.filled(underline(layout.toolbar.pages), look.palette.accent));
+    try std.testing.expectEqual(look.palette.accent, state.textDraw("Done").?.tint);
+}
+
+test "a rounded look draws hovers and selections as shapes" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var renderer = TestRenderer.init(std.testing.allocator);
+    defer renderer.deinit();
+    const layout = Layout.compute(state.window, annotated_layout_options);
+    var look = Look.classic(false);
+    look.style.radius = 6;
+    const palette = look.palette;
+    const panel = layout.panel.?;
+    const selection = theme_module.mix(palette.accent, palette.panel, 0.3);
+
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{
+        .tool = .pen,
+        .look = &look,
+        .hover = .{ .toolbar = .next },
+    }), layout, null);
+    // The hover is a rounded shape, not a rectangle, and toggled buttons
+    // are framed chips without an underline.
+    try std.testing.expect(!state.filled(layout.toolbar.next, palette.hover));
+    try std.testing.expect(batchColored(&state, palette.hover));
+    try std.testing.expect(batchColored(&state, selection));
+    try std.testing.expect(batchColored(&state, palette.surface));
+    try std.testing.expect(!state.filled(underline(layout.toolbar.pages), palette.accent));
+    try std.testing.expect(!state.filled(underline(layout.toolbar.bookmark), palette.accent));
+    // Size buttons are rounded too: no square fill, no square outline.
+    try std.testing.expect(!state.outlined(panel.sizes[1], palette.accent));
+    try std.testing.expect(!state.filled(panel.sizes[0], palette.surface));
+    try std.testing.expect(batchColored(&state, palette.accent));
+    try std.testing.expect(batchColored(&state, palette.border));
+    // Docked surfaces stay rectangular.
+    try std.testing.expect(state.filled(panel.bounds, palette.panel));
+    try std.testing.expect(state.filled(layout.railRect().?, palette.panel));
+
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{
+        .tool = .pen,
+        .look = &look,
+        .hover = .{ .panel = .undo },
+    }), layout, null);
+    try std.testing.expect(!state.filled(panel.undo, palette.hover));
+    try std.testing.expect(batchColored(&state, palette.hover));
+
+    _ = context.beginFrame(palette.background);
+    _ = renderer.draw(context, testFrame(.{
+        .look = &look,
+        .page_count = 40,
+        .scrollbar_dragging = true,
+    }), layout, null);
+    const bar = layout.thumbnailScrollbar(0, 40).?;
+    try std.testing.expect(!state.filled(bar.thumb, palette.accent));
+    try std.testing.expect(batchColored(&state, palette.accent));
+}
+
+test "inks and pens come from the look, and a new revision rebuilds the geometry" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var renderer = TestRenderer.init(std.testing.allocator);
+    defer renderer.deinit();
+    const layout = Layout.compute(state.window, annotated_layout_options);
+    const page_rect = layout.pageRect(.{ .width = 612, .height = 792 }, 1.0);
+    var notebook = annotations.Notebook.init(std.testing.allocator);
+    defer notebook.deinit();
+    try notebook.open(8);
+    notebook.selectPen();
+    _ = try notebook.beginStroke(1, .{ .x = 0.1, .y = 0.1 });
+    _ = try notebook.appendPoint(.{ .x = 0.5, .y = 0.5 });
+    _ = try notebook.finishStroke();
+
+    var look = Look.classic(false);
+    look.inks.blue = theme_module.rgb(1, 2, 3);
+    look.pens.medium = 10;
+    var frame = testFrame(.{
+        .tool = .pen,
+        .look = &look,
+        .look_revision = 1,
+        .page_rect = page_rect,
+        .strokes = notebook.strokesOn(1),
+        .strokes_revision = notebook.revision,
+    });
+    _ = context.beginFrame(look.palette.background);
+    _ = renderer.draw(context, frame, layout, null);
+    try std.testing.expectEqual(
+        theme_module.toFloat(theme_module.rgb(1, 2, 3)),
+        state.batches.items[0].first_color,
+    );
+    const wide = renderer.strokes.mesh.vertices.items[0];
+    _ = renderer.draw(context, frame, layout, null);
+    try std.testing.expectEqual(@as(usize, 1), renderer.strokes.rebuild_count);
+    try std.testing.expectEqual(@as(usize, 1), renderer.swatches.rebuild_count);
+
+    // The same strokes under another look are tessellated again, thinner
+    // and in the new ink.
+    look.inks.blue = theme_module.rgb(9, 9, 9);
+    look.pens.medium = 2;
+    frame.look_revision = 2;
+    _ = context.beginFrame(look.palette.background);
+    _ = renderer.draw(context, frame, layout, null);
+    try std.testing.expectEqual(@as(usize, 2), renderer.strokes.rebuild_count);
+    try std.testing.expectEqual(@as(usize, 2), renderer.swatches.rebuild_count);
+    try std.testing.expectEqual(
+        theme_module.toFloat(theme_module.rgb(9, 9, 9)),
+        state.batches.items[0].first_color,
+    );
+    const thin = renderer.strokes.mesh.vertices.items[0];
+    try std.testing.expect(!std.meta.eql(wide, thin));
+}
+
+test "a font change drops every rasterized text and the measured title" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    const context = mock.Backend.Context{ .state = &state };
+    var renderer = TestRenderer.init(std.testing.allocator);
+    defer renderer.deinit();
+    const layout = Layout.compute(state.window, annotated_layout_options);
+    const frame = testFrame(.{ .tool = .pen });
+
+    _ = renderer.draw(context, frame, layout, null);
+    const created = renderer.text_cache.create_count;
+    const measured = state.measure_count;
+    try std.testing.expect(created > 0);
+    _ = renderer.draw(context, frame, layout, null);
+    try std.testing.expectEqual(created, renderer.text_cache.create_count);
+
+    renderer.fontChanged();
+    _ = renderer.draw(context, frame, layout, null);
+    try std.testing.expectEqual(created * 2, renderer.text_cache.create_count);
+    try std.testing.expect(state.measure_count > measured);
+    // Every texture of the old font was released.
+    try std.testing.expectEqual(created, state.texture_deinit_count);
 }

@@ -6,6 +6,7 @@
 
 pub const platform = @import("platform.zig");
 pub const storage = @import("storage.zig");
+pub const config_files = @import("config_files.zig");
 pub const rendering = @import("rendering.zig");
 pub const arguments = @import("arguments.zig");
 pub const ui = @import("ui.zig");
@@ -18,5 +19,6 @@ pub const Texture = platform.Texture;
 pub const TextImage = platform.TextImage;
 pub const RenderQueue = platform.RenderQueue;
 pub const Storage = storage.Storage;
+pub const ConfigFiles = config_files.ConfigFiles;
 
 pub const Application = application.ApplicationType(@This());

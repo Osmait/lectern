@@ -51,4 +51,4 @@ own, so new files are checked automatically.
 
 - [TigerBeetle Tiger Style](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md)
 - [Ghostty development guide](https://github.com/ghostty-org/ghostty/blob/main/HACKING.md)
-- [Zig 0.16 language reference](https://ziglang.org/documentation/0.16.0/)
+- [Zig 0.17 language reference](https://ziglang.org/documentation/0.17.0/)

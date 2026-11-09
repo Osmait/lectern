@@ -44,7 +44,7 @@ pub fn TextCache(comptime backend: type) type {
             }
         };
 
-        entries: [capacity]Entry = [_]Entry{.{}} ** capacity,
+        entries: [capacity]Entry = @splat(.{}),
         tick: u64 = 0,
         create_count: usize = 0,
 
@@ -53,6 +53,11 @@ pub fn TextCache(comptime backend: type) type {
                 if (entry.texture) |*texture| texture.deinit();
                 entry.* = .{};
             }
+        }
+
+        /// Drops every rasterization; a font change makes them all stale.
+        pub fn clear(self: *Self) void {
+            self.deinit();
         }
 
         /// Returns the cached rasterization, creating it when missing. Texts
@@ -172,18 +177,19 @@ test "texts longer than the key are clipped so the cache and the drawing agree" 
     var cache = TextCache(mock.Backend){};
     defer cache.deinit();
 
-    const long = "x" ** 120;
-    const entry = cache.get(context, long, 13, false, 1.0).?;
+    const long: [120]u8 = @splat('x');
+    const entry = cache.get(context, &long, 13, false, 1.0).?;
     try std.testing.expectEqual(@as(u8, maximum_text_length), entry.length);
     try std.testing.expectEqual(@as(usize, 1), state.labels.items.len);
     const created = state.labels.items[0].textSlice();
     try std.testing.expectEqual(@as(usize, maximum_text_length), created.len);
 
     // A different text with the same first bytes shares the entry.
-    const same_prefix = "x" ** maximum_text_length ++ "y" ** 25;
-    _ = cache.get(context, same_prefix, 13, false, 1.0).?;
+    const same_prefix: [maximum_text_length + 25]u8 =
+        @as([maximum_text_length]u8, @splat('x')) ++ @as([25]u8, @splat('y'));
+    _ = cache.get(context, &same_prefix, 13, false, 1.0).?;
     try std.testing.expectEqual(@as(usize, 1), cache.create_count);
-    _ = cache.get(context, "x" ** (maximum_text_length - 1), 13, false, 1.0).?;
+    _ = cache.get(context, same_prefix[0 .. maximum_text_length - 1], 13, false, 1.0).?;
     try std.testing.expectEqual(@as(usize, 2), cache.create_count);
 }
 

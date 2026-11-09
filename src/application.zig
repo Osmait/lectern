@@ -54,13 +54,15 @@ fn requireDeclarations(
 fn checkBackend(comptime backend: type) void {
     comptime {
         requireDeclarations(backend, "backend", &.{
-            "Context", "Document", "Texture", "TextImage", "Storage", "RenderQueue",
+            "Context",     "Document",    "Texture", "TextImage", "Storage",
+            "RenderQueue", "ConfigFiles",
         });
         requireDeclarations(backend.Context, "backend.Context", &.{
             "deinit",      "lastError",     "pollInput",  "waitInput",   "ticksMs",
             "windowSize",  "pixelDensity",  "setTitle",   "showError",   "openDialog",
             "beginFrame",  "endFrame",      "fillRect",   "strokeRect",  "setClip",
             "drawTexture", "drawTriangles", "createText", "measureText", "createIcon",
+            "setFont",
         });
         requireDeclarations(backend.Document, "backend.Document", &.{
             "open", "deinit", "pageCount", "path", "pageSize", "identity", "render",
@@ -71,6 +73,9 @@ fn checkBackend(comptime backend: type) void {
         });
         requireDeclarations(backend.RenderQueue, "backend.RenderQueue", &.{
             "submit", "cancel", "cancelAll", "reprioritize", "waitIdle", "poll",
+        });
+        requireDeclarations(backend.ConfigFiles, "backend.ConfigFiles", &.{
+            "read", "takeChanged",
         });
     }
 }
@@ -135,6 +140,19 @@ pub fn ApplicationType(comptime backend: type) type {
             }
         };
 
+        const LookSources = struct {
+            config: ?[]u8 = null,
+            theme_file: ?[]u8 = null,
+            desktop_palette: ?[]u8 = null,
+
+            fn clear(self: *LookSources, allocator: std.mem.Allocator) void {
+                if (self.config) |data| allocator.free(data);
+                if (self.theme_file) |data| allocator.free(data);
+                if (self.desktop_palette) |data| allocator.free(data);
+                self.* = .{};
+            }
+        };
+
         const NavigationTarget = union(enum) {
             next,
             previous,
@@ -154,6 +172,22 @@ pub fn ApplicationType(comptime backend: type) type {
         pages: PageCache = .{},
         preferences: Preferences = .{},
         preferences_loaded: bool = false,
+        /// The configuration and theme files, when somebody attached them
+        /// with `useConfig`. Without them the reader keeps its own look.
+        config: ?*backend.ConfigFiles = null,
+        /// The text the look was last resolved from. It is kept so the
+        /// reading mode can change the look without reading files again.
+        look_sources: LookSources = .{},
+        look: ui.theme.Look = ui.theme.Look.classic(true),
+        /// The reading mode `look` was resolved for; null before the first
+        /// resolution.
+        look_dark_mode: ?bool = null,
+        /// Moves with every change of `look`, so the renderer rebuilds what
+        /// it cached from the previous one.
+        look_revision: u64 = 0,
+        /// The `rail` setting last applied; the rail follows the setting
+        /// only when the setting itself changes.
+        rail_setting: bool = true,
         document: ?backend.Document = null,
         document_key: ?DocumentKey = null,
         /// Bumped on every document replacement; render results of an older
@@ -220,11 +254,19 @@ pub fn ApplicationType(comptime backend: type) type {
             self.notebook.deinit();
             self.reader.deinit();
             self.pending_pages.deinit(self.allocator);
+            self.look_sources.clear(self.allocator);
             self.* = undefined;
+        }
+
+        /// Attaches the configuration and theme files. They are read when
+        /// `run` starts and again whenever one of them changes on disk.
+        pub fn useConfig(self: *Self, config: *backend.ConfigFiles) void {
+            self.config = config;
         }
 
         pub fn run(self: *Self, options: RunOptions) !void {
             self.loadPreferences();
+            self.loadLook();
             // The reader starts on an empty desk. The file dialog opens only
             // when the user asks for it, with the Open button or the O key;
             // a path that cannot be opened reports why and leaves the same
@@ -458,14 +500,19 @@ pub fn ApplicationType(comptime backend: type) type {
             if (self.notes.takeDue(now)) self.saveNotes();
             if (self.progress_save.takeDue(now)) self.saveProgress();
             if (self.preferences_save.takeDue(now)) self.savePreferences();
+            if (self.config) |config| {
+                if (config.takeChanged()) self.loadLook();
+            }
             self.collectRenders();
             self.collectSaveResults();
         }
 
         pub fn draw(self: *Self) void {
             const dark_mode = self.preferences.dark_mode;
-            const palette = ui.theme.Palette.forMode(dark_mode);
-            const info = self.context.beginFrame(palette.background);
+            // Lectern's own look has a side for each reading mode, so the
+            // look follows the mode wherever the mode was changed.
+            if (self.look_dark_mode != dark_mode) self.resolveLook();
+            const info = self.context.beginFrame(self.look.palette.background);
             if (!std.meta.eql(info.size, self.window)) {
                 self.window = info.size;
                 self.refreshLayout();
@@ -494,6 +541,8 @@ pub fn ApplicationType(comptime backend: type) type {
                 &.{};
             const frame = Frame{
                 .dark_mode = dark_mode,
+                .look = &self.look,
+                .look_revision = self.look_revision,
                 .document_open = self.document != null,
                 .density = info.density,
                 .document_identity = document_identity,
@@ -678,6 +727,71 @@ pub fn ApplicationType(comptime backend: type) type {
             defer self.allocator.free(data);
             self.preferences = Preferences.parse(data);
             self.preferences_loaded = true;
+        }
+
+        /// Reads the configuration, and the theme file or the desktop
+        /// palette it asks for, and resolves the look from them. A file that
+        /// cannot be read counts as missing.
+        pub fn loadLook(self: *Self) void {
+            self.look_sources.clear(self.allocator);
+            if (self.config) |config| {
+                const sources = &self.look_sources;
+                sources.config = self.readConfigFile(config, .config);
+                const settings = ui.config.Settings.parse(sources.config orelse "");
+                if (settings.themeIsFile()) {
+                    sources.theme_file = self.readConfigFile(config, .{
+                        .theme = settings.theme.slice(),
+                    });
+                } else if (settings.theme.eql(ui.config.auto_theme)) {
+                    sources.desktop_palette = self.readConfigFile(config, .desktop_palette);
+                }
+            }
+            self.resolveLook();
+        }
+
+        fn readConfigFile(
+            self: *Self,
+            config: *backend.ConfigFiles,
+            file: ui.config.File,
+        ) ?[]u8 {
+            return config.read(self.allocator, file) catch |err| {
+                logFailure("read the configuration", err);
+                return null;
+            };
+        }
+
+        /// Builds the look from the text read by `loadLook` and the reading
+        /// mode, and applies what changed: the font of the backend, the
+        /// renderer's caches, and the rail when its setting moved.
+        fn resolveLook(self: *Self) void {
+            const dark_mode = self.preferences.dark_mode;
+            const resolved = ui.config.resolve(.{
+                .config = self.look_sources.config,
+                .theme_file = self.look_sources.theme_file,
+                .desktop_palette = self.look_sources.desktop_palette,
+            }, dark_mode);
+            self.look_dark_mode = dark_mode;
+            if (!std.meta.eql(resolved.look, self.look)) {
+                const same_font = std.meta.eql(resolved.look.style.font, self.look.style.font);
+                self.look = resolved.look;
+                self.look_revision += 1;
+                if (!same_font) {
+                    self.context.setFont(self.look.style.font.slice());
+                    self.renderer.fontChanged();
+                }
+                self.needs_redraw = true;
+            }
+            const rail_open = resolved.settings.rail_open;
+            if (rail_open != self.rail_setting) {
+                self.rail_setting = rail_open;
+                if (self.navigation_visible != rail_open) {
+                    self.navigation_visible = rail_open;
+                    self.scrollbar_grab = null;
+                    self.refreshLayout();
+                    self.refreshHover();
+                    self.needs_redraw = true;
+                }
+            }
         }
 
         fn requestDialog(self: *Self) void {
@@ -1178,10 +1292,11 @@ pub fn ApplicationType(comptime backend: type) type {
 
         fn updateTitle(self: *Self) void {
             var title_buffer: [512]u8 = undefined;
-            const title = std.fmt.bufPrintZ(
+            const title = std.fmt.bufPrintSentinel(
                 &title_buffer,
                 "Lectern - {s} - page {d}/{d}",
                 .{ self.documentTitle(), self.reader.page_index + 1, self.reader.pageCount() },
+                0,
             ) catch "Lectern";
             self.context.setTitle(title);
         }
@@ -2138,4 +2253,195 @@ test "a path that fails to open reports the failure and waits for the user" {
     try std.testing.expectEqual(@as(usize, 1), state.open_dialog_count);
     try std.testing.expect(application.dialog_open);
     try std.testing.expect(!application.running);
+}
+
+const desktop_palette_dark =
+    \\{ "theme": "Frieren", "mode": "dark", "bg": "#19100d", "fg": "#ffffff",
+    \\ "accent": "#da9967", "ground": "#160e0b", "sysBg": "#201916",
+    \\ "sysRaised": "#27201d", "sysActive": "#342d2b", "sysLine": "#403937",
+    \\ "sysFg": "#dad8d8", "sysMuted": "#a29f9d" }
+;
+const desktop_palette_light =
+    \\{ "theme": "Latte", "mode": "light", "bg": "#eff1f5", "fg": "#4c4f69",
+    \\ "accent": "#8839ef" }
+;
+
+test "the look follows the desktop palette and reloads when it changes" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    try state.putFile(mock.Backend.ConfigFiles.palette_name, desktop_palette_dark);
+    var harness: Harness = undefined;
+    harness.init(std.testing.allocator, &state);
+    defer harness.deinit();
+    const application = &harness.application;
+    var config = mock.Backend.ConfigFiles{ .state = &state };
+    application.useConfig(&config);
+
+    application.loadLook();
+    try std.testing.expectEqual(ui.theme.hex(0x201916), application.look.palette.panel);
+    try std.testing.expectEqual(ui.theme.hex(0xda9967), application.look.palette.accent);
+    try std.testing.expectEqual(ui.config.desktop_radius, application.look.style.radius);
+    try std.testing.expectEqualStrings(ui.config.desktop_font, state.fontName());
+    try std.testing.expectEqual(@as(usize, 1), state.set_font_count);
+    const first_revision = application.look_revision;
+
+    // The desktop's hovers are rounded shapes drawn with its colors.
+    try application.openPdf("library/book.pdf");
+    const next = application.layout.toolbar.next;
+    application.handleInput(.{
+        .kind = .mouse_motion,
+        .position = .{ .x = next.centerX(), .y = next.centerY() },
+    });
+    application.draw();
+    try std.testing.expect(!state.filled(next, application.look.palette.hover));
+    try std.testing.expect(state.filled(
+        application.layout.railRect().?,
+        ui.theme.hex(0x201916),
+    ));
+    try std.testing.expect(state.batches.items.len > 0);
+
+    // Nothing is read again until a file changes. The first update lets
+    // the thumbnails of the frame above arrive.
+    application.update(0);
+    const reads = state.config_read_count;
+    application.needs_redraw = false;
+    application.update(0);
+    try std.testing.expectEqual(reads, state.config_read_count);
+    try std.testing.expect(!application.needs_redraw);
+
+    // The desktop switches theme: the palette file is rewritten and the
+    // watcher reports it.
+    try state.putFile(mock.Backend.ConfigFiles.palette_name, desktop_palette_light);
+    state.config_changed = true;
+    application.update(0);
+    try std.testing.expect(!state.config_changed);
+    try std.testing.expectEqual(ui.theme.hex(0xeff1f5), application.look.palette.panel);
+    try std.testing.expectEqual(ui.theme.hex(0x8839ef), application.look.palette.accent);
+    try std.testing.expect(application.look_revision > first_revision);
+    try std.testing.expect(application.needs_redraw);
+    // The font did not change, so the rasterized text is kept.
+    try std.testing.expectEqual(@as(usize, 1), state.set_font_count);
+
+    // A change that resolves to the same look repaints nothing.
+    const settled_revision = application.look_revision;
+    application.needs_redraw = false;
+    state.config_changed = true;
+    application.update(0);
+    try std.testing.expectEqual(settled_revision, application.look_revision);
+    try std.testing.expect(!application.needs_redraw);
+
+    harness.deinit();
+    try expectNoTextureLeaks(&state);
+}
+
+test "the configuration picks a theme, overrides it, and goes back to Lectern's own look" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    try state.putFile(mock.Backend.ConfigFiles.palette_name, desktop_palette_dark);
+    try state.putFile(mock.Backend.ConfigFiles.config_name,
+        \\[general]
+        \\theme = midnight
+        \\[colors]
+        \\accent = #ff0000
+    );
+    try state.putFile("themes/midnight.ini",
+        \\[theme]
+        \\bg = #0f1117
+        \\fg = #e6e6e6
+        \\accent = #7c9cff
+        \\[style]
+        \\font = Iosevka
+    );
+    var harness: Harness = undefined;
+    harness.init(std.testing.allocator, &state);
+    defer harness.deinit();
+    const application = &harness.application;
+    var config = mock.Backend.ConfigFiles{ .state = &state };
+    application.useConfig(&config);
+
+    application.loadLook();
+    try std.testing.expectEqual(ui.theme.hex(0x0f1117), application.look.palette.panel);
+    try std.testing.expectEqual(ui.theme.hex(0xff0000), application.look.palette.accent);
+    try std.testing.expectEqualStrings("Iosevka", state.fontName());
+    // A named theme never reads the desktop palette: config and theme only.
+    try std.testing.expectEqual(@as(usize, 2), state.config_read_count);
+
+    try state.putFile(mock.Backend.ConfigFiles.config_name, "[general]\ntheme = lectern\n");
+    state.config_changed = true;
+    application.update(0);
+    try std.testing.expect(std.meta.eql(ui.theme.Look.classic(true), application.look));
+    try std.testing.expectEqualStrings(ui.theme.default_font, state.fontName());
+    try std.testing.expectEqual(@as(usize, 2), state.set_font_count);
+
+    // A theme whose file is missing falls back the same way.
+    try state.putFile(mock.Backend.ConfigFiles.config_name, "[general]\ntheme = absent\n");
+    state.config_changed = true;
+    application.update(0);
+    try std.testing.expect(std.meta.eql(ui.theme.Look.classic(true), application.look));
+}
+
+test "the reading mode picks the side of Lectern's look and only the paper of a theme" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    var harness: Harness = undefined;
+    harness.init(std.testing.allocator, &state);
+    defer harness.deinit();
+    const application = &harness.application;
+
+    // Without configuration files the look is resolved by the first frame.
+    application.draw();
+    try std.testing.expect(std.meta.eql(ui.theme.Look.classic(true), application.look));
+    application.handleCommand(.toggle_dark_mode);
+    application.draw();
+    try std.testing.expect(std.meta.eql(ui.theme.Look.classic(false), application.look));
+    try std.testing.expectEqual(@as(usize, 0), state.set_font_count);
+
+    try state.putFile(mock.Backend.ConfigFiles.palette_name, desktop_palette_dark);
+    var config = mock.Backend.ConfigFiles{ .state = &state };
+    application.useConfig(&config);
+    application.loadLook();
+    const light_pages = application.look;
+    try std.testing.expectEqual(ui.theme.white, light_pages.palette.paper);
+    application.handleCommand(.toggle_dark_mode);
+    application.draw();
+    try std.testing.expectEqual(light_pages.palette.panel, application.look.palette.panel);
+    try std.testing.expectEqual(light_pages.palette.surface, application.look.palette.paper);
+    try std.testing.expect(application.look_revision > 0);
+}
+
+test "the rail setting moves the rail only when the setting itself changes" {
+    var state = mock.State.init(std.testing.allocator);
+    defer state.deinit();
+    try state.putFile(mock.Backend.ConfigFiles.config_name, "[view]\nrail = off\n");
+    var harness: Harness = undefined;
+    harness.init(std.testing.allocator, &state);
+    defer harness.deinit();
+    const application = &harness.application;
+    var config = mock.Backend.ConfigFiles{ .state = &state };
+    application.useConfig(&config);
+
+    application.loadLook();
+    try std.testing.expect(!application.navigation_visible);
+    try application.openPdf("library/book.pdf");
+    try std.testing.expect(!application.navigation_visible);
+    try std.testing.expectEqual(@as(f32, 0), application.layout.navigation_width);
+
+    // The user opens the rail; an unrelated edit of the file keeps it open.
+    application.handleCommand(.toggle_pages);
+    try std.testing.expect(application.navigation_visible);
+    try state.putFile(
+        mock.Backend.ConfigFiles.config_name,
+        "[view]\nrail = off\n[style]\nradius = 4\n",
+    );
+    state.config_changed = true;
+    application.update(0);
+    try std.testing.expect(application.navigation_visible);
+    try std.testing.expectEqual(@as(f32, 4), application.look.style.radius);
+
+    application.handleCommand(.toggle_pages);
+    try state.putFile(mock.Backend.ConfigFiles.config_name, "[view]\nrail = on\n");
+    state.config_changed = true;
+    application.update(0);
+    try std.testing.expect(application.navigation_visible);
+    try std.testing.expect(application.layout.navigation_width > 0);
 }

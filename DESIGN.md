@@ -258,6 +258,33 @@ status mark. Icons use a consistent authored vector stroke with rounded joins.
 - **Color:** graphite for reversible editing, coral for Clear page,
   ultramarine for Done, and saved green for local persistence.
 
+## Looks
+
+Everything above describes **lectern**, the default look. The interface is
+drawn from a look: a palette of thirteen roles, six inks, three pen widths, a
+font, and a corner radius. A theme fills the palette, and the configuration
+file may change any part of the result.
+
+- **Roles, not colors.** Controls ask for `panel`, `surface`, `hover`,
+  `border`, `text`, `muted`, `accent`, `danger`, and `success`; none of them
+  names a color. A theme of three colors (`bg`, `fg`, `accent`) derives the
+  rest: surfaces, hovers, and rules are `bg` tinted toward the far end of the
+  theme, which keeps every theme flat and tonal like the paper desk.
+- **The desktop look.** The `auto` theme follows the desktop palette and its
+  design system: the header shares the panel surface, the font is
+  JetBrainsMono Nerd Font, and the radius is 6. With a radius, hovers become
+  rounded shapes and a selected control becomes a raised chip framed by the
+  accent stepped 30 % toward the panel; the accent underline belongs to the
+  square look only.
+- **What never changes.** Layout, hit targets, icons, and the hierarchy of the
+  annotation margin are the same in every look. Docked surfaces — the folio
+  bar, the rail, and the margin — stay rectangular and edge-aligned; only
+  controls take the radius. Rounded shapes are antialiased with a one-pixel
+  soft edge.
+- **The reading mode is the reader's.** Dark pages are a preference of the
+  person reading, not of the theme: a theme decides the chrome, and the mode
+  decides the page and its ink.
+
 ## Do's and Don'ts
 
 ### Do:

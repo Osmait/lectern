@@ -22,8 +22,8 @@ native test suite, so they always show the current interface.*
 
 The reading state, the interface, and the application logic live in Zig. A
 narrow C bridge exposes only rendering and input primitives, keeping the
-macro-heavy SDL/Poppler headers away from Zig 0.16's C translator while still
-using their native APIs directly.
+macro-heavy SDL/Poppler headers away from Zig's C translator while still using
+their native APIs directly; only the bridge's own small header is translated.
 
 ## Features
 
@@ -31,6 +31,8 @@ using their native APIs directly.
 - Automatically resume at the last page
 - Add bookmarks and jump between them
 - Dark and light reading modes, remembered across documents and launches
+- A look you configure: themes that follow the desktop palette live, twelve
+  built in, and your own, plus the font, corners, inks, and pen widths
 - High-DPI text, vector icons, and pages rasterized at the size they are shown
 - Pages rendered in the background: the neighbors of the current page are
   prepared ahead of time, so most page turns are instant and the window never
@@ -55,7 +57,7 @@ backends can be added without rewriting reader behavior.
 
 ## Requirements
 
-- Zig 0.16.x
+- Zig 0.17.x
 - SDL3
 - Poppler GLib
 - Cairo
@@ -79,6 +81,13 @@ You can also open a PDF directly:
 zig build run -- /path/to/book.pdf
 ```
 
+Install it for your user, with its desktop entry and icon:
+
+```bash
+./install.sh            # ~/.local/bin/lectern
+./install.sh --default  # and make it the default PDF reader
+```
+
 Started without a path, the reader shows an empty desk and waits: press `O`,
 click **Open**, or drop a PDF on the window. The file dialog never opens on
 its own.
@@ -92,7 +101,7 @@ its own.
 | `Right` / `Page Down` / `Space` / `>` | Next page |
 | `B` | Toggle bookmark |
 | `J` | Jump to the next bookmark |
-| `D` | Toggle dark mode |
+| `D` | Toggle dark pages |
 | `+` / `-` | Zoom in / out |
 | `0` | Reset zoom |
 | `Home` / `End` | First / last page |
@@ -130,6 +139,82 @@ window or page zoom changes. They are stored in a versioned sidecar file next
 to the reading-state record and written a moment after each edit. The source
 PDF is never changed. If a PDF is replaced by a revision with fewer pages, the
 notes on the missing pages are skipped and the rest are kept.
+
+## Make it yours
+
+Everything is in `~/.config/lectern` (or `$XDG_CONFIG_HOME/lectern`) and is
+reloaded the moment you save it. The first start writes a commented
+`config.ini` and `themes/example.ini` to copy from.
+
+| File | |
+| --- | --- |
+| `config.ini` | The theme, and anything you want to change on top of it |
+| `themes/NAME.ini` | A theme of your own: three colors, plus optional style |
+
+```ini
+[general]
+theme = auto          ; auto, lectern, a built-in name, or themes/NAME.ini
+
+[view]
+rail = true           ; open the page rail with every document
+
+[style]
+font = Noto Sans      ; the interface font; the PDF keeps its own
+radius = 0            ; corners of hovers, selections, and buttons
+
+[colors]              ; any color of the active theme, one by one
+accent = #2363d8
+
+[ink]                 ; blue red black yellow green purple black_on_dark
+yellow = #f3c341
+
+[pen]                 ; stroke widths in pixels
+thin = 2
+medium = 4
+thick = 8
+```
+
+Every line is optional, and a value that cannot be read only costs its own
+line: the reader says so on standard error and keeps the default.
+
+### Themes
+
+`theme = auto`, the default, follows the desktop. It reads
+`~/.cache/rice/palette.json`, the palette the desktop's own panels use, and
+takes the desktop's design system with it: the same surfaces, rules, and
+accent, JetBrainsMono Nerd Font, and rounded chips for hovers and selections.
+When the desktop switches theme the file is rewritten and Lectern repaints
+with the new colors at once. Without that file `auto` is `lectern`, the paper
+desk shown above.
+
+The built-in themes are `lectern`, `catppuccin-mocha`, `catppuccin-latte`,
+`dracula`, `nord`, `gruvbox-dark`, `gruvbox-light`, `tokyo-night`,
+`rose-pine`, `one-dark`, `solarized-dark`, `solarized-light`, and `black`.
+
+A theme of your own is a file in `themes`; `theme = midnight` reads
+`themes/midnight.ini`:
+
+```ini
+[theme]
+bg = #0f1117
+fg = #e6e6e6
+accent = #7c9cff
+
+; optional: far muted canvas header header_text surface hover border
+; danger success, and dark = true | false
+
+[style]               ; optional, like [colors], [ink], and [pen]
+font = JetBrainsMono Nerd Font
+radius = 6
+```
+
+The colors a theme leaves out are worked out from the three it gives: raised
+surfaces, hovers, and rules are `bg` tinted 5.5 %, 12 %, and 11 % toward
+`far` (white on a dark theme). `config.ini` always wins over the theme.
+
+`D` and the theme button switch the reading mode: light pages, or inverted
+pages with light ink. Under `lectern` the chrome changes with it; every other
+theme decides the chrome itself, so only the page changes.
 
 ## Stored files
 

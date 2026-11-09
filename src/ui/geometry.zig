@@ -2,7 +2,9 @@
 //! can draw many shapes with a single geometry call.
 
 const std = @import("std");
-const Vec2 = @import("layout.zig").Vec2;
+const layout = @import("layout.zig");
+const Vec2 = layout.Vec2;
+const Rect = layout.Rect;
 const theme = @import("theme.zig");
 const Rgba = theme.Rgba;
 const FColor = theme.FColor;
@@ -110,6 +112,98 @@ pub fn appendCircle(
         mesh.indices.appendAssumeCapacity(base);
         mesh.indices.appendAssumeCapacity(base + current);
         mesh.indices.appendAssumeCapacity(base + following);
+    }
+}
+
+/// Segments of each corner of a rounded rectangle.
+pub const corner_segments: u32 = 6;
+/// Width of the band along the edge of a rounded rectangle that fades from
+/// the fill to nothing. Triangles are not antialiased, so this band is what
+/// keeps the corners smooth.
+const feather: f32 = 1;
+
+/// A quarter of the unit circle, from 0 to 90 degrees inclusive.
+fn quarterCircle(comptime segments: u32) [segments + 1]Vec2 {
+    var table: [segments + 1]Vec2 = undefined;
+    for (&table, 0..) |*point, index| {
+        const turn: f32 = @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(segments));
+        const angle: f32 = turn * std.math.pi / 2.0;
+        point.* = .{ .x = @cos(angle), .y = @sin(angle) };
+    }
+    return table;
+}
+
+/// Appends a filled rectangle with round corners and a soft edge. The radius
+/// is limited to half the shorter side, which turns a wide rectangle into a
+/// pill.
+pub fn appendRoundedRect(
+    mesh: *Mesh,
+    allocator: std.mem.Allocator,
+    rect: Rect,
+    radius: f32,
+    color: Rgba,
+) error{OutOfMemory}!void {
+    if (rect.isEmpty()) return;
+    const quarter = comptime quarterCircle(corner_segments);
+    const rim_count: u32 = 4 * (corner_segments + 1);
+    const corner = std.math.clamp(radius, 0, @min(rect.w, rect.h) / 2);
+    const inner_radius = @max(corner - feather / 2, 0);
+    const outer_radius = corner + feather / 2;
+    // The corner centers sit one radius inside the rectangle; a square
+    // corner still gets its soft edge from the half pixel on either side.
+    const inset = @max(corner, feather / 2);
+    const left = rect.x + inset;
+    const right = rect.x + rect.w - inset;
+    const top = rect.y + inset;
+    const bottom = rect.y + rect.h - inset;
+    const inner_reach = inner_radius + (inset - corner);
+    const outer_reach = outer_radius + (inset - corner);
+
+    const fill = theme.toFloat(color);
+    var clear = fill;
+    clear.alpha = 0;
+    const base: u32 = @intCast(mesh.vertices.items.len);
+    try mesh.reserve(allocator, 1 + rim_count * 2, rim_count * 9);
+    mesh.pushVertex(.{ .x = rect.centerX(), .y = rect.centerY() }, fill);
+    // Clockwise on screen from the bottom right corner; each corner turns
+    // the quarter circle by another 90 degrees.
+    const centers = [4]Vec2{
+        .{ .x = right, .y = bottom },
+        .{ .x = left, .y = bottom },
+        .{ .x = left, .y = top },
+        .{ .x = right, .y = top },
+    };
+    for (centers, 0..) |center, turn| {
+        for (quarter) |unit| {
+            const direction: Vec2 = switch (turn) {
+                0 => unit,
+                1 => .{ .x = -unit.y, .y = unit.x },
+                2 => .{ .x = -unit.x, .y = -unit.y },
+                else => .{ .x = unit.y, .y = -unit.x },
+            };
+            mesh.pushVertex(.{
+                .x = center.x + direction.x * inner_reach,
+                .y = center.y + direction.y * inner_reach,
+            }, fill);
+            mesh.pushVertex(.{
+                .x = center.x + direction.x * outer_reach,
+                .y = center.y + direction.y * outer_reach,
+            }, clear);
+        }
+    }
+    var index: u32 = 0;
+    while (index < rim_count) : (index += 1) {
+        const inner = base + 1 + index * 2;
+        const next_inner = base + 1 + ((index + 1) % rim_count) * 2;
+        mesh.indices.appendAssumeCapacity(base);
+        mesh.indices.appendAssumeCapacity(inner);
+        mesh.indices.appendAssumeCapacity(next_inner);
+        mesh.indices.appendAssumeCapacity(inner);
+        mesh.indices.appendAssumeCapacity(inner + 1);
+        mesh.indices.appendAssumeCapacity(next_inner + 1);
+        mesh.indices.appendAssumeCapacity(inner);
+        mesh.indices.appendAssumeCapacity(next_inner + 1);
+        mesh.indices.appendAssumeCapacity(next_inner);
     }
 }
 
@@ -503,4 +597,56 @@ test "the builder starts over on reset and handles an empty stroke" {
     try builder.extend(std.testing.allocator, &.{ .{ .x = 0, .y = 0 }, .{ .x = 10, .y = 0 } });
     try std.testing.expectEqual(@as(usize, 2), builder.strip.triangleCount());
     try std.testing.expect(builder.rounds.isEmpty());
+}
+
+test "a rounded rectangle stays inside its soft edge and fades out at the rim" {
+    var mesh = Mesh{};
+    defer mesh.deinit(std.testing.allocator);
+    const rect = Rect{ .x = 10, .y = 20, .w = 44, .h = 30 };
+    try appendRoundedRect(&mesh, std.testing.allocator, rect, 6, theme.rgb(10, 20, 30));
+    const rim = 4 * (corner_segments + 1);
+    try std.testing.expectEqual(@as(usize, 1 + rim * 2), mesh.vertices.items.len);
+    try std.testing.expectEqual(mesh.vertices.items.len, mesh.colors.items.len);
+    try std.testing.expectEqual(@as(usize, rim * 3), mesh.triangleCount());
+    var opaque_count: usize = 0;
+    for (mesh.vertices.items, mesh.colors.items) |vertex, color| {
+        try std.testing.expect(vertex.x >= rect.x - 0.51 and vertex.x <= rect.x + rect.w + 0.51);
+        try std.testing.expect(vertex.y >= rect.y - 0.51 and vertex.y <= rect.y + rect.h + 0.51);
+        if (color.alpha == 1) {
+            opaque_count += 1;
+            // Opaque vertices never leave the rectangle.
+            try std.testing.expect(vertex.x >= rect.x and vertex.x <= rect.x + rect.w);
+            try std.testing.expect(vertex.y >= rect.y and vertex.y <= rect.y + rect.h);
+        } else try std.testing.expectEqual(@as(f32, 0), color.alpha);
+    }
+    try std.testing.expectEqual(@as(usize, 1 + rim), opaque_count);
+    for (mesh.indices.items) |vertex_index| {
+        try std.testing.expect(vertex_index < mesh.vertices.items.len);
+    }
+    // No corner of the bounding box is covered: that is what makes it round.
+    for (mesh.vertices.items) |vertex| {
+        const dx = @min(vertex.x - rect.x, rect.x + rect.w - vertex.x);
+        const dy = @min(vertex.y - rect.y, rect.y + rect.h - vertex.y);
+        try std.testing.expect(dx > 0.5 or dy > 0.5);
+    }
+}
+
+test "the corner radius is limited by the rectangle and empty rectangles add nothing" {
+    var mesh = Mesh{};
+    defer mesh.deinit(std.testing.allocator);
+    // A radius larger than the shape makes a pill, not an inside-out mesh.
+    const pill = Rect{ .x = 0, .y = 0, .w = 40, .h = 6 };
+    try appendRoundedRect(&mesh, std.testing.allocator, pill, 99, theme.white);
+    for (mesh.vertices.items) |vertex| {
+        try std.testing.expect(vertex.x >= -0.51 and vertex.x <= 40.51);
+        try std.testing.expect(vertex.y >= -0.51 and vertex.y <= 6.51);
+    }
+    const count = mesh.vertices.items.len;
+    try appendRoundedRect(&mesh, std.testing.allocator, Rect.empty, 6, theme.white);
+    try std.testing.expectEqual(count, mesh.vertices.items.len);
+    // A second shape indexes its own vertices.
+    try appendRoundedRect(&mesh, std.testing.allocator, pill, 0, theme.white);
+    try std.testing.expectEqual(count * 2, mesh.vertices.items.len);
+    const last = mesh.indices.items[mesh.indices.items.len - 1];
+    try std.testing.expect(last >= count);
 }

@@ -3,6 +3,7 @@
 
 const annotations = @import("lectern").annotations;
 const layout = @import("layout.zig");
+const theme = @import("theme.zig");
 
 pub const SaveStatus = enum {
     saved,
@@ -24,7 +25,13 @@ pub const FrameInfo = struct {
 };
 
 pub const Frame = struct {
+    /// The reading mode: pages are inverted and black ink turns light.
     dark_mode: bool,
+    /// Colors, inks, pens, font, and corners. Null draws Lectern's own look
+    /// for the reading mode.
+    look: ?*const theme.Look = null,
+    /// Moves whenever `look` changes, so cached geometry is rebuilt.
+    look_revision: u64 = 0,
     document_open: bool,
     /// Device pixels per logical pixel of the frame being drawn.
     density: f32 = 1,
