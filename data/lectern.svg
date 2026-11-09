@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Lectern</title>
+  <!-- The linen-dark desk -->
+  <rect width="256" height="256" rx="58" fill="#171717"/>
+  <rect x="1.5" y="1.5" width="253" height="253" rx="56.5" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="3"/>
+
+  <!-- The stand: stem and foot -->
+  <rect x="120" y="182" width="16" height="36" fill="#3d3d3f"/>
+  <rect x="82" y="212" width="92" height="14" rx="7" fill="#505052"/>
+
+  <!-- The open book, edges of the page block first -->
+  <path d="M40 76 Q84 60 128 78 Q172 60 216 76 V180 Q172 166 128 184 Q84 166 40 180 Z" fill="#cfcbc1"/>
+  <path d="M46 70 Q88 56 128 74 V178 Q88 160 46 174 Z" fill="#f8f7f1"/>
+  <path d="M128 74 Q168 56 210 70 V174 Q168 160 128 178 Z" fill="#edebe4"/>
+  <path d="M128 74 V178" stroke="#bdb9af" stroke-width="2"/>
+
+  <!-- Printed lines -->
+  <g fill="none" stroke="#b9b5ab" stroke-width="5" stroke-linecap="round">
+    <path d="M62 90 Q88 82 112 90"/>
+    <path d="M62 108 Q88 100 112 108"/>
+    <path d="M62 126 Q88 118 112 126"/>
+    <path d="M62 144 Q80 138 96 141"/>
+    <path d="M144 90 Q160 84 174 86"/>
+    <path d="M144 108 Q158 102 172 104"/>
+  </g>
+
+  <!-- A note in the margin, in ultramarine ink -->
+  <path d="M142 140 C152 124 160 152 170 136 S186 126 196 140" fill="none" stroke="#2f6fdb" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- The bookmark -->
+  <path d="M182 60 H198 V112 L190 103 L182 112 Z" fill="#d94f4a"/>
+
+  <!-- The ledge the book rests on -->
+  <rect x="30" y="176" width="196" height="14" rx="7" fill="#6a6a6d"/>
+</svg>
