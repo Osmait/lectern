@@ -189,6 +189,11 @@ void lectern_draw_triangles(LECTERN_Context *context,
                        const int *indices,
                        size_t index_count);
 
+/* Selects the font family of every text created or measured afterwards;
+ * NULL or an empty name selects the default family. Textures created before
+ * keep the font they were rasterized with, so the caller drops them. A family
+ * the system does not have falls back to the system's default sans. */
+void lectern_set_font(LECTERN_Context *context, const char *family);
 LECTERN_Texture *lectern_create_text(LECTERN_Context *context,
                            const char *text,
                            int size,

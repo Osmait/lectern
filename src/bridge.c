@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define LECTERN_FONT_FAMILY "Noto Sans"
+#define LECTERN_DEFAULT_FONT_FAMILY "Noto Sans"
 
 /* Codes of the SDL user events the bridge posts to itself. */
 enum {
@@ -27,6 +27,8 @@ struct LECTERN_Context {
     cairo_surface_t *measure_surface;
     cairo_t *measure;
     cairo_font_options_t *font_options;
+    /* The interface font; NULL means the default family. */
+    char *font_family;
     /* Rectangles waiting to be drawn as one triangle list. */
     LECTERN_Point *quad_points;
     LECTERN_FColor *quad_colors;
@@ -82,14 +84,23 @@ uint64_t lectern_ticks_ms(void) {
 }
 
 static void configure_font(cairo_t *cr,
-                           const cairo_font_options_t *font_options,
+                           const LECTERN_Context *context,
                            int size,
                            int strong) {
-    cairo_select_font_face(cr, LECTERN_FONT_FAMILY, CAIRO_FONT_SLANT_NORMAL,
+    const char *family = context->font_family ? context->font_family
+                                              : LECTERN_DEFAULT_FONT_FAMILY;
+    cairo_select_font_face(cr, family, CAIRO_FONT_SLANT_NORMAL,
                            strong ? CAIRO_FONT_WEIGHT_BOLD
                                   : CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_options(cr, font_options);
+    cairo_set_font_options(cr, context->font_options);
     cairo_set_font_size(cr, size);
+}
+
+void lectern_set_font(LECTERN_Context *context, const char *family) {
+    if (!context) return;
+    char *copy = (family && family[0]) ? strdup(family) : NULL;
+    free(context->font_family);
+    context->font_family = copy;
 }
 
 LECTERN_Context *lectern_init(char **error_message) {
@@ -130,9 +141,13 @@ void lectern_shutdown(LECTERN_Context *context) {
     cairo_destroy(context->measure);
     cairo_surface_destroy(context->measure_surface);
     cairo_font_options_destroy(context->font_options);
+    /* Cairo keeps font faces in static caches that outlive every object.
+     * Releasing them here is what lets a leak checker end the run clean. */
+    cairo_debug_reset_static_data();
     free(context->quad_points);
     free(context->quad_colors);
     free(context->quad_indices);
+    free(context->font_family);
     free(context->last_error);
     SDL_DestroyRenderer(context->renderer);
     SDL_DestroyWindow(context->window);
@@ -575,7 +590,7 @@ LECTERN_Texture *lectern_create_text(LECTERN_Context *context,
                            int strong,
                            float *logical_width,
                            float *logical_height) {
-    configure_font(context->measure, context->font_options, size, strong);
+    configure_font(context->measure, context, size, strong);
     cairo_text_extents_t text_extents;
     cairo_font_extents_t font_extents;
     cairo_text_extents(context->measure, text, &text_extents);
@@ -600,7 +615,7 @@ LECTERN_Texture *lectern_create_text(LECTERN_Context *context,
     cairo_paint(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
     cairo_scale(cr, density, density);
-    configure_font(cr, context->font_options, size, strong);
+    configure_font(cr, context, size, strong);
     /* Text is rasterized white and tinted at draw time, so one texture serves
      * every color the interface needs. */
     cairo_set_source_rgba(cr, 1, 1, 1, 1);
@@ -619,7 +634,7 @@ LECTERN_Texture *lectern_create_text(LECTERN_Context *context,
 }
 
 float lectern_measure_text(LECTERN_Context *context, const char *text, int size, int strong) {
-    configure_font(context->measure, context->font_options, size, strong);
+    configure_font(context->measure, context, size, strong);
     cairo_text_extents_t extents;
     cairo_text_extents(context->measure, text, &extents);
     return (float)logical_text_width(&extents);

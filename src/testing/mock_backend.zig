@@ -18,6 +18,7 @@ const input = ui.input;
 const layout = ui.layout;
 const theme = ui.theme;
 const frame_module = ui.frame;
+const config_module = ui.config;
 
 pub const DrawnRect = struct {
     rect: layout.Rect,
@@ -101,6 +102,13 @@ pub const State = struct {
     last_wait_timeout: ?u32 = null,
     write_count: usize = 0,
     read_count: usize = 0,
+    /// Set by a test after it changed a configuration file; the application
+    /// takes it like the notification of the native watcher.
+    config_changed: bool = false,
+    config_read_count: usize = 0,
+    set_font_count: usize = 0,
+    font: [64]u8 = undefined,
+    font_length: usize = 0,
     submitted_job_count: usize = 0,
     cancelled_job_count: usize = 0,
     next_job_id: u64 = 1,
@@ -283,6 +291,10 @@ pub const State = struct {
 
     pub fn getFile(self: *State, name: []const u8) ?[]const u8 {
         return self.files.get(name);
+    }
+
+    pub fn fontName(self: *const State) []const u8 {
+        return self.font[0..self.font_length];
     }
 
     pub fn titleText(self: *const State) []const u8 {
@@ -513,6 +525,13 @@ pub const Backend = struct {
             return glyph_width * @as(f32, @floatFromInt(text.len)) + 8;
         }
 
+        pub fn setFont(self: Context, family: [:0]const u8) void {
+            self.state.set_font_count += 1;
+            const kept = @min(family.len, self.state.font.len);
+            @memcpy(self.state.font[0..kept], family[0..kept]);
+            self.state.font_length = kept;
+        }
+
         pub fn createIcon(self: Context, icon: theme.Icon, color: theme.Rgba) ?Texture {
             self.state.icon_create_count += 1;
             return self.state.newTexture(.{
@@ -708,6 +727,40 @@ pub const Backend = struct {
 
         pub fn flush(self: *Storage) void {
             _ = self;
+        }
+    };
+
+    /// Configuration files live in the same in-memory file table as the
+    /// state, under the names `configName` gives them.
+    pub const ConfigFiles = struct {
+        state: *State,
+
+        pub const config_name = "config.ini";
+        pub const palette_name = "palette.json";
+
+        pub fn configName(file: config_module.File, buffer: []u8) []const u8 {
+            return switch (file) {
+                .config => config_name,
+                .desktop_palette => palette_name,
+                .theme => |name| std.fmt.bufPrint(buffer, "themes/{s}.ini", .{name}) catch "",
+            };
+        }
+
+        pub fn read(
+            self: *ConfigFiles,
+            allocator: std.mem.Allocator,
+            file: config_module.File,
+        ) error{OutOfMemory}!?[]u8 {
+            self.state.config_read_count += 1;
+            var buffer: [96]u8 = undefined;
+            const data = self.state.files.get(configName(file, &buffer)) orelse return null;
+            return try allocator.dupe(u8, data);
+        }
+
+        pub fn takeChanged(self: *ConfigFiles) bool {
+            const changed = self.state.config_changed;
+            self.state.config_changed = false;
+            return changed;
         }
     };
 };

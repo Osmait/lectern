@@ -5,7 +5,7 @@ testable, and small enough to review with confidence.
 
 ## Development setup
 
-Install Zig 0.16.x, SDL3, Poppler GLib, and Cairo. On Arch Linux:
+Install Zig 0.17.x, SDL3, Poppler GLib, and Cairo. On Arch Linux:
 
 ```bash
 sudo pacman -S zig sdl3 poppler-glib cairo

@@ -18,9 +18,7 @@ const theme = ui.theme;
 const input = ui.input;
 const frame = ui.frame;
 
-const c = @cImport({
-    @cInclude("bridge.h");
-});
+const c = @import("bridge");
 
 pub const Texture = struct {
     handle: *c.LECTERN_Texture,
@@ -199,6 +197,12 @@ pub const Context = struct {
         );
     }
 
+    /// Selects the interface font. Text rasterized before keeps its font,
+    /// so the caller drops its text caches.
+    pub fn setFont(self: Context, family: [:0]const u8) void {
+        c.lectern_set_font(self.handle, family.ptr);
+    }
+
     pub fn createText(self: Context, text: [:0]const u8, size: u8, strong: bool) ?TextImage {
         var width: f32 = 0;
         var height: f32 = 0;
@@ -220,7 +224,7 @@ pub const Context = struct {
     pub fn createIcon(self: Context, icon: theme.Icon, color: theme.Rgba) ?Texture {
         const handle = c.lectern_create_icon(
             self.handle,
-            @intFromEnum(icon),
+            @backingInt(icon),
             toColor(color),
         ) orelse return null;
         return Texture.fromHandle(handle);
@@ -244,7 +248,7 @@ pub const Document = struct {
         allocator: std.mem.Allocator,
         raw_path: []const u8,
     ) error{ InvalidPdf, OutOfMemory }!Document {
-        const path_z = try allocator.dupeZ(u8, raw_path);
+        const path_z = try allocator.dupeSentinel(u8, raw_path, 0);
         defer allocator.free(path_z);
         const handle = c.lectern_pdf_open(context.handle, path_z.ptr) orelse {
             return error.InvalidPdf;
@@ -500,6 +504,12 @@ pub const RenderQueue = struct {
     }
 };
 
+/// Ends the frame loop's wait from any thread. The loop sees a
+/// `render_ready` input, runs its timers, and collects whatever finished.
+pub fn wake() void {
+    c.lectern_wake();
+}
+
 fn convertInput(allocator: std.mem.Allocator, native: c.LECTERN_Input) input.RawInput {
     defer if (native.path != null) c.lectern_free(native.path);
     var raw = input.RawInput{
@@ -542,9 +552,10 @@ fn comptimeUpper(comptime name: []const u8) []const u8 {
 /// the two sides cannot drift apart silently.
 fn checkNativeConstants(comptime Enum: type, comptime prefix: []const u8) void {
     comptime {
-        for (std.meta.fields(Enum)) |field| {
-            const native_name = prefix ++ comptimeUpper(field.name);
-            if (@field(c, native_name) != field.value) {
+        const info = @typeInfo(Enum).@"enum";
+        for (info.field_names, info.field_values) |name, value| {
+            const native_name = prefix ++ comptimeUpper(name);
+            if (@field(c, native_name) != value) {
                 @compileError("native constant " ++ native_name ++ " does not match " ++
                     @typeName(Enum));
             }

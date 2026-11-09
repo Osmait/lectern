@@ -343,8 +343,8 @@ pub const Notebook = struct {
         for (self.pages, 0..) |page, page_index| {
             for (page.items) |stroke| {
                 appendU32(&output, @intCast(page_index));
-                output.appendAssumeCapacity(@intFromEnum(stroke.color));
-                output.appendAssumeCapacity(@intFromEnum(stroke.pen_size));
+                output.appendAssumeCapacity(@backingInt(stroke.color));
+                output.appendAssumeCapacity(@backingInt(stroke.pen_size));
                 output.appendSliceAssumeCapacity(&.{ 0, 0 });
                 appendU32(&output, @intCast(stroke.points.len));
                 for (stroke.points) |point| {
@@ -657,10 +657,10 @@ test "serialized annotations round trip without losing style or points" {
 }
 
 test "every ink color survives annotation persistence with stable tags" {
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(Color.blue));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(Color.black));
-    try std.testing.expectEqual(@as(u8, 5), @intFromEnum(Color.purple));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(PenSize.thick));
+    try std.testing.expectEqual(@as(u8, 0), @backingInt(Color.blue));
+    try std.testing.expectEqual(@as(u8, 2), @backingInt(Color.black));
+    try std.testing.expectEqual(@as(u8, 5), @backingInt(Color.purple));
+    try std.testing.expectEqual(@as(u8, 2), @backingInt(PenSize.thick));
 
     var source = Notebook.init(std.testing.allocator);
     defer source.deinit();

@@ -47,8 +47,8 @@ pub fn nextJobIndex(comptime Document: type, jobs: []const Job(Document)) ?usize
             best = index;
             continue;
         };
-        const rank = @intFromEnum(job.priority);
-        const best_rank = @intFromEnum(jobs[current].priority);
+        const rank = @backingInt(job.priority);
+        const best_rank = @backingInt(jobs[current].priority);
         if (rank < best_rank or (rank == best_rank and job.id < jobs[current].id)) best = index;
     }
     return best;

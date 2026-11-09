@@ -12,10 +12,7 @@ const app = @import("app");
 const annotations = lectern.annotations;
 const DocumentKey = app.storage.DocumentKey;
 
-const c = @cImport({
-    @cInclude("SDL3/SDL.h");
-    @cInclude("string.h");
-});
+const c = @import("c");
 
 const fixture = "tests/fixtures/research-methods-eight.pdf";
 /// SDL ends each poll cycle with a sentinel, so a few rounds are needed to

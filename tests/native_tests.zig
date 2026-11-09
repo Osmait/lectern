@@ -12,12 +12,7 @@ const platform = app.platform;
 const ui = app.ui;
 const annotations = lectern.annotations;
 
-const c = @cImport({
-    @cInclude("SDL3/SDL.h");
-    @cInclude("cairo/cairo.h");
-    @cInclude("stdlib.h");
-    @cInclude("string.h");
-});
+const c = @import("c");
 
 const screenshot_directory = ".zig-cache/screenshots";
 const golden_directory = "tests/golden";
@@ -80,10 +75,10 @@ fn checkGolden(name: [:0]const u8, screenshot_path: [:0]const u8) !void {
     c.cairo_surface_mark_dirty(small);
 
     var path_buffer: [128]u8 = undefined;
-    const golden_path = try std.fmt.bufPrintZ(&path_buffer, "{s}/{s}.png", .{
+    const golden_path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/{s}.png", .{
         golden_directory,
         name,
-    });
+    }, 0);
     if (build_options.update_golden) {
         std.Io.Dir.cwd().createDirPath(std.testing.io, golden_directory) catch {};
         const written = c.cairo_surface_write_to_png(small, golden_path.ptr);
@@ -555,10 +550,10 @@ test "the desktop renderer paints every surface through the native bridge" {
         }
 
         var path_buffer: [128]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buffer, "{s}/{s}.bmp", .{
+        const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/{s}.bmp", .{
             screenshot_directory,
             shot.name,
-        });
+        }, 0);
         try std.testing.expect(context.saveScreenshot(path));
         context.endFrame();
         try checkGolden(shot.name, path);

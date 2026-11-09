@@ -3,12 +3,13 @@
 Lectern separates portable reading behavior from native desktop services.
 
 ```text
-src/main.zig  (owns the window, the storage, and the render queue)
-    |
+src/main.zig  (owns the window, the storage, the configuration files,
+    |          and the render queue)
     v
 src/desktop.zig -----> src/application.zig -----> src/ui/*.zig
     |                        |                     layout, input, theme,
-    |                        |                     geometry, caches, renderer
+    |                        |                     config, geometry, caches,
+    |                        |                     renderer
     |                        |-- src/page_cache.zig
     |                        |-- src/rendering.zig   render job vocabulary
     |                        v
@@ -18,10 +19,13 @@ src/desktop.zig -----> src/application.zig -----> src/ui/*.zig
     |                    |-- src/progress.zig
     |                    |-- src/preferences.zig
     |                    |-- src/key_value.zig
+    |                    |-- src/ini.zig
     |                    `-- src/path_helpers.zig
     |
-    |----> src/platform.zig -----> src/bridge.c   SDL3, Poppler GLib, Cairo
-    `----> src/storage.zig  -----> std.Io         state directory
+    |----> src/platform.zig     -----> src/bridge.c   SDL3, Poppler GLib, Cairo
+    |----> src/storage.zig      -----> std.Io         state directory
+    `----> src/config_files.zig -----> std.Io         configuration directory,
+                                       inotify        desktop palette
 ```
 
 ## Dependency rule
@@ -55,8 +59,9 @@ lets the renderer reuse stroke geometry between frames. Notes on pages that
 the open document no longer has are skipped and counted, like progress
 entries for missing pages. `progress.zig` and `preferences.zig` parse and
 serialize the text formats for per-document progress and application
-preferences on top of `key_value.zig`. `path_helpers.zig` contains portable
-path behavior.
+preferences on top of `key_value.zig`. `ini.zig` iterates the sectioned
+`key = value` text of the configuration and theme files. `path_helpers.zig`
+contains portable path behavior.
 
 `root.zig` is the public core module. Future reusable features should be
 exported here only when they do not depend on the desktop backend.
@@ -71,7 +76,12 @@ window height upward. The layout also resolves what the pointer is over once;
 the application stores that hover and hands it to the renderer inside the
 `Frame`, so repaint decisions and highlights always agree. `ui/input.zig`
 turns raw window input into typed `Command` values. `ui/theme.zig` holds the
-palettes, the ink colors and pen widths of annotations, and icon identities.
+palettes, the ink colors and pen widths of annotations, and icon identities,
+gathered into a `Look`: everything that decides how the interface is drawn.
+`ui/config.zig` builds a look from text somebody else read: the theme
+(Lectern's own, the desktop palette, a built-in one, or a theme file), then
+that file's overrides, then the configuration file's. It never touches a
+file, so every rule of the format is unit tested.
 `ui/geometry.zig` converts strokes and circles into colored triangle lists
 whose vertex colors already have the bridge's float layout; the unit circle
 is computed at compile time and round joins are only added where a stroke
@@ -83,7 +93,10 @@ strokes are tessellated once per page revision and drawn as a single batch,
 the active stroke grows incrementally, and the swatches of the margin are
 one cached batch that changes only with the selection, the hover, or the
 theme. The text cache finds entries by a hash of text, size, weight, and
-density.
+density. Cached geometry also carries the revision of the look it was built
+from. Controls are filled through one helper that draws a plain rectangle in
+the square look and an antialiased rounded shape when the look has a corner
+radius, so the default look issues exactly the commands it always did.
 
 The renderer is generic over the backend type. Production uses the SDL adapter;
 tests use `testing/mock_backend.zig`, which counts every primitive call.
@@ -109,6 +122,27 @@ render finishes:
 The layout is recomputed when the window size or one of its three flags
 changes and read everywhere else, so pointer moves never ask the window for
 its size.
+
+### Look
+
+The application owns the current `Look` and hands it to the renderer inside
+every `Frame`. It is resolved from three pieces of text, kept in memory: the
+configuration file, the theme file it names, and the desktop palette.
+
+- `main.zig` attaches the configuration files with `useConfig`. Without them,
+  as in every test and in the smoke run, the reader keeps its own look, so
+  reference screenshots never depend on the machine.
+- The files are read when the application starts and again when the watcher
+  reports a change. The watcher thread sets a flag and wakes the frame loop,
+  which reads the files on its next turn; the thread itself never parses or
+  touches application state.
+- The reading mode is part of the resolution: it picks the side of Lectern's
+  own look and the paper of every other theme. Toggling it resolves again
+  from the text in memory, without reading files.
+- A look that resolves to the same value changes nothing. A different one
+  moves the look revision, which makes the renderer rebuild stroke and swatch
+  geometry; a different font also changes the font of the backend and drops
+  the rasterized text.
 
 ### Rendering
 
@@ -189,13 +223,26 @@ the reading theme; per-document `.state` files hold the page and bookmarks,
 and `.state.notes` files hold annotations. A legacy `dark` line in a `.state`
 file is adopted once when no preferences file exists yet.
 
+### Configuration files
+
+`config_files.zig` resolves `$XDG_CONFIG_HOME/lectern` and the desktop palette
+under `$XDG_CACHE_HOME/rice`, creates the folder with a commented
+`config.ini` and an example theme on the first start, and reads files on
+request. Its watcher is one thread blocked on inotify, so an idle reader
+still costs no CPU. It watches folders rather than files, because editors and
+theme switchers replace files; it reacts when a writer closes a file or
+renames one into place, never to a file being created or half written, and
+it ignores every file of those folders that the look does not read.
+
 ### Native bridge
 
 `bridge.c` integrates SDL3, Poppler GLib, and Cairo. The bridge exists because
-their macro-heavy headers currently exceed Zig 0.16's reliable `translate-c`
-surface. It exposes only primitives: raw input events, window queries, frame
-begin and end, rectangles, tinted textures, colored triangle lists, text and
-icon rasterization, and PDF page rasterization at a requested scale, either
+their macro-heavy headers exceed what Zig's C translator handles reliably;
+the build translates only `bridge.h`, and the test and profiling roots
+translate the small headers that sit beside them. It exposes only primitives:
+raw input events, window queries, frame begin and end, rectangles, tinted
+textures, colored triangle lists, the interface font, text and icon
+rasterization, and PDF page rasterization at a requested scale, either
 straight to a texture on the main thread or to an image that any thread may
 produce and the main thread uploads later. A wake call from any thread ends
 the input wait. Text is rasterized white and tinted at draw time so one

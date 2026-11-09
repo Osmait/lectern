@@ -5,6 +5,7 @@ pub const baseName = @import("path_helpers.zig").baseName;
 pub const annotations = @import("annotations.zig");
 pub const progress = @import("progress.zig");
 pub const key_value = @import("key_value.zig");
+pub const ini = @import("ini.zig");
 pub const Preferences = @import("preferences.zig").Preferences;
 
 test {
@@ -13,5 +14,6 @@ test {
     _ = @import("annotations.zig");
     _ = @import("progress.zig");
     _ = @import("key_value.zig");
+    _ = @import("ini.zig");
     _ = @import("preferences.zig");
 }

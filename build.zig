@@ -2,17 +2,15 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 comptime {
-    if (builtin.zig_version.major != 0 or builtin.zig_version.minor != 16) {
+    if (builtin.zig_version.major != 0 or builtin.zig_version.minor != 17) {
         @compileError(std.fmt.comptimePrint(
-            "unsupported Zig version: expected 0.16.x, found {}",
+            "unsupported Zig version: expected 0.17.x, found {}",
             .{builtin.zig_version},
         ));
     }
 }
 
 pub fn build(b: *std.Build) void {
-    b.reference_trace = 10;
-
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const test_filter = b.option([]const u8, "test-filter", "Run matching tests only");
@@ -33,7 +31,7 @@ pub fn build(b: *std.Build) void {
 
     const run_command = b.addRunArtifact(executable);
     run_command.step.dependOn(b.getInstallStep());
-    if (b.args) |arguments| run_command.addArgs(arguments);
+    run_command.addPassthruArgs();
     const run_step = b.step("run", "Run the PDF reader");
     run_step.dependOn(&run_command.step);
 
@@ -111,6 +109,12 @@ pub fn build(b: *std.Build) void {
         },
     });
     native_test_module.addIncludePath(b.path("src"));
+    native_test_module.addImport("c", translateHeader(
+        b,
+        "tests/native_tests.h",
+        native_test_module,
+        &.{ "sdl3", "cairo" },
+    ));
     native_test_module.linkSystemLibrary("sdl3", .{});
     native_test_module.linkSystemLibrary("cairo", .{});
     const native_tests = b.addTest(.{
@@ -135,6 +139,12 @@ pub fn build(b: *std.Build) void {
         },
     });
     end_to_end_module.addIncludePath(b.path("src"));
+    end_to_end_module.addImport("c", translateHeader(
+        b,
+        "tests/end_to_end_tests.h",
+        end_to_end_module,
+        &.{"sdl3"},
+    ));
     end_to_end_module.linkSystemLibrary("sdl3", .{});
     const end_to_end_tests = b.addTest(.{
         .root_module = end_to_end_module,
@@ -237,6 +247,12 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "app", .module = profile_desktop_module }},
     });
     profile_module.addIncludePath(b.path("src"));
+    profile_module.addImport("c", translateHeader(
+        b,
+        "tools/profile_session.h",
+        profile_module,
+        &.{"sdl3"},
+    ));
     profile_module.linkSystemLibrary("sdl3", .{});
     const profile_executable = b.addExecutable(.{
         .name = "lectern-profile",
@@ -273,11 +289,35 @@ fn addExecutable(b: *std.Build, options: ExecutableOptions) *std.Build.Step.Comp
     });
 }
 
+/// Translates a C header into a Zig module. The headers are small on
+/// purpose: the bridge keeps the macro-heavy native APIs behind plain C.
+fn translateHeader(
+    b: *std.Build,
+    header: []const u8,
+    module: *std.Build.Module,
+    libraries: []const []const u8,
+) *std.Build.Module {
+    const translate = b.addTranslateC(.{
+        .root_source_file = b.path(header),
+        .target = module.resolved_target.?,
+        .optimize = module.optimize.?,
+    });
+    translate.addIncludePath(b.path("src"));
+    for (libraries) |library| translate.linkSystemLibrary(library, .{});
+    return translate.createModule();
+}
+
 fn addNativeLibraries(b: *std.Build, module: *std.Build.Module) void {
     module.addIncludePath(b.path("src"));
+    module.addImport("bridge", translateHeader(b, "src/bridge.h", module, &.{}));
     module.addCSourceFile(.{
         .file = b.path("src/bridge.c"),
-        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Wpedantic", "-Werror" },
+        // GLib's own headers use `__COUNTER__` in optimized builds, which the
+        // pedantic check reports as a C2y extension; that one is not ours.
+        .flags = &.{
+            "-std=c11",   "-Wall",   "-Wextra",
+            "-Wpedantic", "-Werror", "-Wno-c2y-extensions",
+        },
     });
     module.linkSystemLibrary("sdl3", .{});
     module.linkSystemLibrary("poppler-glib", .{});
@@ -292,7 +332,7 @@ fn addNativeLibraries(b: *std.Build, module: *std.Build.Module) void {
 fn collectStyleFiles(b: *std.Build) []const []const u8 {
     var files: std.ArrayList([]const u8) = .empty;
     for ([_][]const u8{ "src", "tests", "tools" }) |root| {
-        var dir = b.build_root.handle.openDir(b.graph.io, root, .{ .iterate = true }) catch |err| {
+        var dir = b.root.openDir(b.graph.io, root, .{ .iterate = true }) catch |err| {
             std.debug.panic("could not open {s} for style checks: {s}", .{ root, @errorName(err) });
         };
         defer dir.close(b.graph.io);
