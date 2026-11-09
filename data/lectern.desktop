@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Lectern
+GenericName=PDF Reader
+Comment=Native PDF reader with freehand notes
+Exec=lectern %f
+Icon=lectern
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;
+StartupWMClass=lectern
