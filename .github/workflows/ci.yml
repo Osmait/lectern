@@ -16,7 +16,7 @@ env:
   # Arch Linux is a rolling distribution, so packages are installed from a
   # dated snapshot of the package archive. Bump the date deliberately, after
   # confirming the snapshot ships Zig 0.17.x.
-  ARCH_SNAPSHOT: 2026/08/30
+  ARCH_SNAPSHOT: 2026/11/08
 
 jobs:
   quality:
